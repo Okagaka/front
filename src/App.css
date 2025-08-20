@@ -1,38 +1,220 @@
-.App {
-  text-align: center;
+/* ===== 토큰 ===== */
+:root{
+  --primary:#6a34d6;
+  --border:#bda5f6;
+  --error:#ff4d4f;
+  --bg:#f4f3f9;
+
+  --radius:16px;
+  --shadow-card:0 10px 30px rgba(86,24,187,.15);
+  --pad:clamp(16px, 4vw, 24px);
+
+  /* 개발용 스마트폰 프레임 */
+  --phone-w:390px; /* 360~414로 조정 가능 */
+  --phone-h:844px;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+*{ box-sizing:border-box; }
+html, body, #root{ height:100%; }
+body{
+  margin:0;
+  background:var(--bg);
+  color:#222;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  -webkit-tap-highlight-color:transparent;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Roboto,Arial,sans-serif;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
+/* ===== 기본 레이아웃 (프레임 미사용 시) ===== */
+.wrap{
+  min-height:100vh;
+  min-height:100dvh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:var(--pad);
+}
+.card{
+  width:100%;
+  max-width:420px;
+  background:#fff;
+  border-radius:var(--radius);
+  padding:var(--pad);
+  box-shadow:var(--shadow-card);
+  display:flex;
+  flex-direction:column;
 }
 
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
+/* ===== 로그인 UI ===== */
+.logoArea{ display:flex; flex-direction:column; align-items:center; gap:8px; margin-bottom:clamp(12px, 5vh, 24px); }
+.car{ font-size:clamp(44px, 12vw, 64px); }
+.brand{ margin:0; font-size:clamp(20px, 6vw, 24px); color:var(--primary); letter-spacing:.5px; }
+
+.label{ display:block; margin:10px 0 6px; font-weight:600; color:#333; font-size:clamp(14px, 3.8vw, 16px); }
+
+/* iOS 포커스 확대 방지: 16px+ */
+.input{
+  width:100%;
+  height:48px;
+  font-size:16px;
+  padding:12px 14px;
+  border-radius:12px;
+  outline:none;
+  border:1.5px solid var(--border);
+  background:#fff;
+  transition:border-color .15s ease, box-shadow .15s ease;
+  -webkit-appearance:none;
+}
+.input:focus,
+.input:focus-visible{
+  border-color:var(--primary);
+  box-shadow:0 0 0 3px rgba(106,52,214,.15);
 }
 
-.App-link {
-  color: #61dafb;
+.error{ color:var(--error); font-size:clamp(11px, 3.2vw, 12px); margin:8px 0 0; }
+
+.primaryBtn{
+  width:100%;
+  height:52px;
+  margin-top:16px;
+  padding:12px 14px;
+  border:none;
+  border-radius:12px;
+  background:var(--primary);
+  color:#fff;
+  font-weight:700;
+  font-size:clamp(15px, 4.2vw, 17px);
+  cursor:pointer;
+  box-shadow:0 8px 18px rgba(106,52,214,.25);
+  touch-action:manipulation;
+}
+.primaryBtn:active{ transform:translateY(1px); }
+.primaryBtn:disabled{ opacity:.6; cursor:default; }
+
+.sub{ margin-top:12px; text-align:center; color:#666; font-size:clamp(13px, 3.6vw, 14px); }
+.sub a{ color:var(--primary); text-decoration:none; font-weight:600; }
+.sub a:hover{ text-decoration:underline; }
+
+/* ===== Phone preview frame (개발용) ===== */
+.phone{
+  width:var(--phone-w);
+  height:var(--phone-h);
+  margin:16px auto;
+  border-radius:28px;
+  background:var(--bg);
+  box-shadow:0 20px 60px rgba(0,0,0,.15);
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+/* 프레임 내부: 흰 화면을 전체로, 컨텐츠를 '정중앙' 배치 */
+.phone .wrap{
+  min-height:100%;
+  min-height:100dvh;
+  padding:0;
+}
+.phone .card{
+  width:100%;
+  height:100%;
+  max-width:none;
+  border-radius:0;
+  box-shadow:none;
+  background:#fff;
+  /* 안전영역 + 내부 여백 */
+  padding:calc(var(--pad) + env(safe-area-inset-top)) var(--pad)
+          calc(var(--pad) + env(safe-area-inset-bottom));
+  display:flex;
+  flex-direction:column;
+  justify-content:center;                 /* ← 핵심: 세로 가운데 정렬 */
+  gap:clamp(18px, 4vh, 28px);             /* 섹션 간 간격 */
+  overflow-y:auto;                        /* 키보드/작은 화면 대응 */
+}
+
+/* 중앙 배치 시 과도한 상하 여백 제거/조정 */
+.phone .logoArea{ margin-bottom:0; }
+.phone form{ display:flex; flex-direction:column; gap:12px; }
+.phone .sub{ margin-top:4px; }
+
+/* 작은 노트북 화면에서 프레임 세로만 줄이기 */
+@media (max-height:900px){
+  .phone{ height:min(var(--phone-h), 90vh); }
+}
+
+/* 아주 작은 기기(<=360px 폭) 보정 */
+@media (max-width:360px){
+  :root{ —pad:clamp(14px, 4.5vw, 20px); }
+  .card{ border-radius:14px; }
+  .primaryBtn{ height:50px; }
+}
+
+/* ===== 회원가입 화면 오버라이드 ===== */
+
+/* 로그인은 중앙정렬, 회원가입은 상단부터 자연스러운 스크롤 */
+.card.signup{
+  justify-content: flex-start;    /* 중앙정렬 해제 */
+  gap: 16px;
+}
+
+/* 상단 헤더 (뒤로가기) */
+.header{
+  display:flex; align-items:center; justify-content:flex-start;
+  margin-bottom: 4px;
+}
+.iconBtn{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:40px; height:40px; border-radius:12px; border:none; background:transparent;
+  font-size:22px; cursor:pointer;
+}
+.iconBtn:active{ transform: translateY(1px); }
+
+/* 섹션 타이틀 */
+.sectionTitle{
+  margin-top: 6px;
+  margin-bottom: 6px;
+  font-weight: 700;
+  color:#333;
+  font-size: clamp(14px, 3.8vw, 16px);
+}
+
+/* 카메라/갤러리 버튼(보라색 펠렛) */
+.pillBtn{
+  width:100%;
+  height:52px;
+  border:none;
+  border-radius:26px;
+  background:var(--primary);
+  color:#fff;
+  font-weight:800;
+  font-size: clamp(14px, 4vw, 16px);
+  display:flex; align-items:center; justify-content:center; gap:10px;
+  box-shadow:0 8px 18px rgba(106,52,214,.25);
+  cursor:pointer; touch-action: manipulation;
+}
+.pillIcon{
+  width:32px; height:32px; display:inline-flex; align-items:center; justify-content:center;
+  background: rgba(255,255,255,.15);
+  border-radius:50%;
+  font-size:18px;
+}
+
+/* 주소 입력 + 지도 아이콘 한 줄 */
+.inputRow{ position:relative; }
+.inputRow .input{ padding-right:54px; }
+.mapBtn{
+  position:absolute; right:6px; top:50%; transform:translateY(-50%);
+  width:40px; height:40px; border-radius:12px;
+  background:#fff; border:1.5px solid var(--border);
+  font-size:18px;
+}
+
+/* 업로드 미리보기 */
+.photoPreview{
+  margin-top:6px;
+  display:flex; justify-content:center;
+}
+.photoPreview img{
+  width:120px; height:120px; object-fit:cover; border-radius:12px;
+  border:1px solid #eee;
 }
