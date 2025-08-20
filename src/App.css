@@ -65,6 +65,7 @@ body{
   background:#fff;
   transition:border-color .15s ease, box-shadow .15s ease;
   -webkit-appearance:none;
+  appearance: none;         /* 표준 */
 }
 .input:focus,
 .input:focus-visible{
@@ -144,7 +145,7 @@ body{
 
 /* 아주 작은 기기(<=360px 폭) 보정 */
 @media (max-width:360px){
-  :root{ —pad:clamp(14px, 4.5vw, 20px); }
+  :root{ padding:clamp(14px, 4.5vw, 20px); }
   .card{ border-radius:14px; }
   .primaryBtn{ height:50px; }
 }
