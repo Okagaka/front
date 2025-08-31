@@ -145,7 +145,7 @@ export default function MainMap() {
   const uploadAbortRef = useRef(null);
 
   /* === 녹음 시작 === */
-  const startRecording = async () => {
+  const startRecording = useCallback(async () => {
     if (recState !== "idle") return;
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
@@ -160,7 +160,7 @@ export default function MainMap() {
       console.error(e);
       alert("마이크 접근에 실패했습니다. 브라우저 권한을 확인하세요.");
     }
-  };
+  }, [recState]);
 
   /* === 녹음 종료 + 업로드 (FormData file=.wav + Authorization) === */
   const stopAndTranscribe = useCallback(async () => {
@@ -201,7 +201,6 @@ export default function MainMap() {
 
       // 5xx는 서버 문제라 텍스트 먼저 확인
       if (res.status >= 500) {
-        const txt = await res.text().catch(() => "");
         alert("서버 내부 오류가 발생했습니다. (STT)\n개발자 콘솔 로그를 확인해 주세요.");
         setStatus("");
         return;
@@ -221,7 +220,6 @@ export default function MainMap() {
       console.log("[STT response]", payload);
       if (text) {
         setStatus("인식 완료");
-        setQuery(text);   // 검색창에 넣어줌 (원하시면 다른 곳에 활용)
         setOpen(true);
       } else {
         setStatus("음성을 인식하지 못했어요. 다시 말씀해 주세요.");
@@ -240,18 +238,26 @@ export default function MainMap() {
 
   // 8초 자동 종료
   useEffect(() => {
-    if (recState !== "recording") return;
-    const t = setTimeout(stopAndTranscribe, 8000);
-    return () => clearTimeout(t);
-  }, [recState, stopAndTranscribe]);
-
-  // 🎤 버튼 토글
-  const onMicClick = async (e) => {
-    e.stopPropagation();
-    if (recState === "idle") return startRecording();
-    if (recState === "recording") return stopAndTranscribe();
-    if (recState === "uploading") uploadAbortRef.current?.abort();
-  };
+    const onToggle = () => {
+      if (recState === "idle") {
+        startRecording();
+      } else if (recState === "recording") {
+        stopAndTranscribe();
+      } else if (recState === "uploading") {
+        // 업로드 중이면 취소(선택 사항)
+        uploadAbortRef.current?.abort();
+      }
+    };
+    window.addEventListener("app/mic-toggle", onToggle);
+    return () => window.removeEventListener("app/mic-toggle", onToggle);
+  }, [recState, startRecording, stopAndTranscribe]);
+  // // 🎤 버튼 토글
+  // const onMicClick = async (e) => {
+  //   e.stopPropagation();
+  //   if (recState === "idle") return startRecording();
+  //   if (recState === "recording") return stopAndTranscribe();
+  //   if (recState === "uploading") uploadAbortRef.current?.abort();
+  // };
 
   /* ===== 로그인 정보 수신/복구 ===== */
   useEffect(() => {
@@ -542,53 +548,6 @@ export default function MainMap() {
 
   return (
     <div className="mainShell" onClick={() => setOpen(false)}>
-      <header className="appBar">
-        <button className="appIcon" aria-label="메뉴"
-          onClick={(e) => { e.stopPropagation(); setDrawerOpen(true); }}>☰</button>
-        <div className="appTitle">오카가카</div>
-        <button
-          className="appIcon"
-          aria-label="음성"
-          onClick={onMicClick}
-          disabled={recState === "uploading"}
-          title={recState === "idle" ? "눌러서 말하기 시작" :
-                 recState === "recording" ? "다시 눌러서 종료" : "업로드 중…"}
-        >
-          {recState === "recording" ? "⏺" : "🎤"}
-        </button>
-      </header>
-
-      <div className={`backdrop ${drawerOpen ? "show" : ""}`} onClick={() => setDrawerOpen(false)} />
-      <aside className={`drawer ${drawerOpen ? "open" : ""}`} onClick={(e) => e.stopPropagation()} aria-label="사이드 메뉴">
-        <div className="drawerHeader">
-          <div className="brandRow"><span className="car">🚗</span><strong>오카가카</strong></div>
-          <button className="closeBtn" onClick={() => setDrawerOpen(false)}>×</button>
-        </div>
-        <nav className="menuList">
-          <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/"); }}>
-            <span className="miIcon">🏠</span><span>홈 화면</span>
-          </button>
-          <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/reserve"); }}>
-            <span className="miIcon">📅</span><span>차량 예약</span>
-          </button>
-          <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/carpool"); }}>
-            <span className="miIcon">🧑‍🧒‍🧒</span><span>카풀 내역</span>
-          </button>
-          <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/history"); }}>
-            <span className="miIcon">🧾</span><span>이용 내역</span>
-          </button>
-          <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/me"); }}>
-            <span className="miIcon">👤</span><span>내 정보</span>
-          </button>
-          <hr className="menuDivider" />
-          <button className="menuItem danger" onClick={() => {
-            setDrawerOpen(false); sessionStorage.removeItem("auth"); alert("로그아웃 되었습니다."); nav("/", { replace: true });
-          }}>
-            <span className="miIcon">↩</span><span>로그아웃</span>
-          </button>
-        </nav>
-      </aside>
-
       <div className="searchWrap" onClick={(e) => e.stopPropagation()}>
         <div className="searchBar">
           <span className="pin">📍</span>
@@ -628,7 +587,6 @@ export default function MainMap() {
         .backdrop.show{ opacity:.35; background:rgba(0,0,0,.45); pointer-events:auto; }
         .drawer{ position:absolute; top:0; bottom:0; left:0; width:min(78vw,320px); background:#fff; box-shadow:6px 0 22px rgba(0,0,0,.18);
                  transform:translateX(-110%); transition:transform .22s; z-index:50; display:flex; flex-direction:column; }
-        .drawer.open{ transform:translateX(0); }
         .drawerHeader{ display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid #f0f0f3; }
         .brandRow{ display:flex; align-items:center; gap:8px; font-size:16px; }
         .closeBtn{ width:36px; height:36px; border:none; border-radius:10px; background:#f5f5f7; font-size:20px; cursor:pointer; }
