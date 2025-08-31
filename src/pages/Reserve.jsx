@@ -13,6 +13,7 @@ function extractBunjiFromData(data) {
   };
   return pick(data?.jibunAddress) || pick(data?.autoJibunAddress) || "";
 }
+
 const CITY_MAP = {
   "서울": "서울특별시","부산":"부산광역시","대구":"대구광역시","인천":"인천광역시",
   "광주":"광주광역시","대전":"대전광역시","울산":"울산광역시","세종":"세종특별자치시",
@@ -20,118 +21,205 @@ const CITY_MAP = {
   "전북":"전북특별자치도","전남":"전라남도","경북":"경상북도","경남":"경상남도",
   "제주":"제주특별자치도",
 };
-function normalizeCityDo(v=""){const t=v.trim(); if(!t) return t; if(/(특별시|광역시|도|특별자치도|특별자치시)$/.test(t)) return t; return CITY_MAP[t]||t;}
-function toShortCityDo(v=""){return v.replace("특별자치시","시").replace("특별자치도","도").replace("특별시","시").replace("광역시","시");}
+function normalizeCityDo(v = "") {
+  const t = v.trim();
+  if (!t) return t;
+  if (/(특별시|광역시|도|특별자치도|특별자치시)$/.test(t)) return t;
+  return CITY_MAP[t] || t;
+}
+// 전송에는 사용하지 않지만 남겨둠
+function toShortCityDo(v = "") {
+  return v
+    .replace("특별자치시", "시")
+    .replace("특별자치도", "도")
+    .replace("특별시", "시")
+    .replace("광역시", "시");
+}
 
-function nowDateStr(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
-function nowTimeStr(){const d=new Date();return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;}
+function nowDateStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function nowTimeStr() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 
-export default function Reserve(){
-  const [title,setTitle]=useState("");
-  const [date,setDate]=useState(nowDateStr());
-  const [time,setTime]=useState(nowTimeStr());
-  const [from,setFrom]=useState({cityDo:"",guGun:"",dong:"",bunji:""});
-  const [to,setTo]=useState({cityDo:"",guGun:"",dong:"",bunji:""});
+// ✅ 공통 POST 헬퍼 (회원가입처럼 JSON 전송 + 인증 둘 다 대응)
+async function postReservation(url, payload, opts = {}) {
+  // JWT 토큰이 있다면 Authorization 헤더에 붙이고, 세션 기반이면 쿠키 전송
+  const token =
+    localStorage.getItem("accessToken") ||
+    sessionStorage.getItem("accessToken") ||
+    localStorage.getItem("token") ||
+    sessionStorage.getItem("token");
 
-  const [showPostcode,setShowPostcode]=useState(false);
-  const [pcTarget,setPcTarget]=useState(null);
-  const postcodeRef=useRef(null);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+    credentials: "include", // 세션 쿠키 방식일 수도 있으므로 포함(있어도 무해)
+    ...opts,
+  });
 
-  const [kakaoReady,setKakaoReady]=useState(false);
-  useEffect(()=>{
-    const t=setInterval(()=>{ if(window.kakao?.maps?.services && window.daum?.Postcode){ setKakaoReady(true); clearInterval(t); } },100);
-    return ()=>clearInterval(t);
-  },[]);
+  const ct = res.headers.get("content-type") || "";
+  const body = ct.includes("application/json") ? await res.json() : await res.text();
 
-  const geolocateToFrom=async()=>{
-    if(!kakaoReady || !navigator.geolocation) return false;
-    const geocoder=new window.kakao.maps.services.Geocoder();
-    return new Promise((resolve)=>{
+  if (!res.ok) {
+    console.error("[Reservation API Error]", {
+      status: res.status,
+      statusText: res.statusText,
+      requestUrl: url,
+      requestBody: payload,
+      response: body,
+      headers: Object.fromEntries(res.headers.entries()),
+    });
+    const msg =
+      typeof body === "string" ? body || `HTTP ${res.status}` : body?.message || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return body;
+}
+
+export default function Reserve() {
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState(nowDateStr());
+  const [time, setTime] = useState(nowTimeStr());
+  const [from, setFrom] = useState({ cityDo: "", guGun: "", dong: "", bunji: "" });
+  const [to, setTo] = useState({ cityDo: "", guGun: "", dong: "", bunji: "" });
+
+  const [showPostcode, setShowPostcode] = useState(false);
+  const [pcTarget, setPcTarget] = useState(null);
+  const postcodeRef = useRef(null);
+
+  const [kakaoReady, setKakaoReady] = useState(false);
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (window.kakao?.maps?.services && window.daum?.Postcode) {
+        setKakaoReady(true);
+        clearInterval(t);
+      }
+    }, 100);
+    return () => clearInterval(t);
+  }, []);
+
+  const geolocateToFrom = async () => {
+    if (!kakaoReady || !navigator.geolocation) return false;
+    const geocoder = new window.kakao.maps.services.Geocoder();
+    return new Promise((resolve) => {
       navigator.geolocation.getCurrentPosition(
-        ({coords})=>{
-          const coord=new window.kakao.maps.LatLng(coords.latitude,coords.longitude);
-          geocoder.coord2Address(coord.getLng(),coord.getLat(),(result,status)=>{
-            if(status!==window.kakao.maps.services.Status.OK || !result?.length) return resolve(false);
-            const a=result[0].address||{};
-            const cityDo=normalizeCityDo(a.region_1depth_name||"");
-            const guGun=a.region_2depth_name||"";
-            const dong=a.region_3depth_name||"";
-            const s=(a.address_name||"").replace(/\s*\(.*?\)\s*/g,"").trim();
-            const m=s.match(/(\d+(?:-\d+)?)$/);
-            const bunji=m?m[1]:"";
-            setFrom({cityDo,guGun,dong,bunji});
+        ({ coords }) => {
+          const coord = new window.kakao.maps.LatLng(coords.latitude, coords.longitude);
+          geocoder.coord2Address(coord.getLng(), coord.getLat(), (result, status) => {
+            if (status !== window.kakao.maps.services.Status.OK || !result?.length) return resolve(false);
+            const a = result[0].address || {};
+            const cityDo = normalizeCityDo(a.region_1depth_name || "");
+            const guGun = a.region_2depth_name || "";
+            const dong = a.region_3depth_name || "";
+            const s = (a.address_name || "").replace(/\s*\(.*?\)\s*/g, "").trim();
+            const m = s.match(/(\d+(?:-\d+)?)$/);
+            const bunji = m ? m[1] : "";
+            setFrom({ cityDo, guGun, dong, bunji });
             resolve(true);
           });
         },
-        ()=>resolve(false),
-        {enableHighAccuracy:true,timeout:8000}
+        () => resolve(false),
+        { enableHighAccuracy: true, timeout: 8000 }
       );
     });
   };
 
-  useEffect(()=>{
-    if(!kakaoReady) return;
-    (async()=>{
-      let ok=await geolocateToFrom();
-      if(!ok) setTimeout(()=>geolocateToFrom(), 900);
+  useEffect(() => {
+    if (!kakaoReady) return;
+    (async () => {
+      let ok = await geolocateToFrom();
+      if (!ok) setTimeout(() => geolocateToFrom(), 900);
     })();
     // eslint-disable-next-line
-  },[kakaoReady]);
+  }, [kakaoReady]);
 
-  const openAddressSearch=(target)=>{
-    if(!window.daum?.Postcode){ alert("주소 검색 스크립트를 로드하지 못했습니다."); return; }
-    setPcTarget(target); setShowPostcode(true);
+  const openAddressSearch = (target) => {
+    if (!window.daum?.Postcode) {
+      alert("주소 검색 스크립트를 로드하지 못했습니다.");
+      return;
+    }
+    setPcTarget(target);
+    setShowPostcode(true);
   };
-  useEffect(()=>{
-    if(!showPostcode || !postcodeRef.current || !window.daum?.Postcode) return;
-    const pc=new window.daum.Postcode({
-      oncomplete:(data)=>{
-        const cityDo=normalizeCityDo((data.sido||"").trim());
-        const guGun=(data.sigungu||"").trim();
-        const dong=(data.bname||data.bname1||"").trim();
-        const bunji=extractBunjiFromData(data);
-        if(pcTarget==="from") setFrom({cityDo,guGun,dong,bunji});
-        else setTo({cityDo,guGun,dong,bunji});
-        setShowPostcode(false); setPcTarget(null);
+
+  useEffect(() => {
+    if (!showPostcode || !postcodeRef.current || !window.daum?.Postcode) return;
+    const pc = new window.daum.Postcode({
+      oncomplete: (data) => {
+        const cityDo = normalizeCityDo((data.sido || "").trim());
+        const guGun = (data.sigungu || "").trim();
+        const dong = (data.bname || data.bname1 || "").trim();
+        const bunji = extractBunjiFromData(data);
+        if (pcTarget === "from") setFrom({ cityDo, guGun, dong, bunji });
+        else setTo({ cityDo, guGun, dong, bunji });
+        setShowPostcode(false);
+        setPcTarget(null);
       },
-      width:"100%", height:"100%",
+      width: "100%",
+      height: "100%",
     });
     pc.embed(postcodeRef.current);
-  },[showPostcode,pcTarget]);
+  }, [showPostcode, pcTarget]);
 
-  const handleSubmit=async(e)=>{
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    const payload={
-      title:title?.trim()||"개인 출근",
-      date,
-      arrivalTime:`${time}:00`,
-      departureCityDo:toShortCityDo(from.cityDo||""),
-      departureGuGun:from.guGun||"",
-      departureDong:from.dong||"",
-      departureBunji:from.bunji||"",
-      destinationCityDo:toShortCityDo(to.cityDo||""),
-      destinationGuGun:to.guGun||"",
-      destinationDong:to.dong||"",
-      destinationBunji:to.bunji||"",
+    if (submitting) return;
+    setSubmitting(true);
+
+    const payload = {
+      title: (title || "").trim() || "개인 출근",
+      date,                          // "YYYY-MM-DD"
+      arrivalTime: `${time}:00`,     // "HH:mm:ss"
+      // ✅ 시/도는 '서울특별시' 같은 풀네임 그대로 전송
+      departureCityDo: from.cityDo || "",
+      departureGuGun: from.guGun || "",
+      departureDong: from.dong || "",
+      departureBunji: from.bunji || "",
+      destinationCityDo: to.cityDo || "",
+      destinationGuGun: to.guGun || "",
+      destinationDong: to.dong || "",
+      destinationBunji: to.bunji || "",
     };
-    try{
-      const res=await fetch(RESERVE_ENDPOINT,{
-        method:"POST",
-        headers:{ "Content-Type":"application/json", Accept:"application/json" },
-        body:JSON.stringify(payload),
-      });
-      const text=await res.text().catch(()=> "");
-      if(!res.ok) throw new Error(text||`HTTP ${res.status}`);
-      alert("예약이 완료되었습니다.");
-    }catch(err){
-      alert(err.message||"예약 중 오류가 발생했습니다.");
+
+    try {
+      const result = await postReservation(RESERVE_ENDPOINT, payload);
+      if (result?.status === 200) {
+        alert(result.message || "예약이 확정되었습니다.");
+        console.log("예약 ID:", result.data?.reservationId);
+        console.log("출발 예정 시간:", result.data?.calculatedDepartureTime);
+        // 필요 시 이동/상태 저장:
+        // navigate(`/reservation/${result.data.reservationId}`);
+      } else {
+        throw new Error(result?.message || "예약에 실패했습니다.");
+      }
+    } catch (err) {
+      alert(err?.message || "서버 오류가 발생했습니다.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const Input=({label,value,onChange,placeholder,type="text"})=>(
+  const Input = ({ label, value, onChange, placeholder, type = "text" }) => (
     <div className="field">
       <label className="label">{label}</label>
-      <input className="input" value={value} onChange={(e)=>onChange(e.target.value)} placeholder={placeholder} type={type}/>
+      <input
+        className="input"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        type={type}
+      />
     </div>
   );
 
@@ -150,7 +238,7 @@ export default function Reserve(){
               placeholder="예) 출근, 마트, 병원 방문 등"
               name="title"
               autoComplete="off"
-              onChange={(e)=> setTitle(e.target.value)}
+              onChange={(e) => setTitle(e.target.value)}
             />
           </div>
 
@@ -159,15 +247,19 @@ export default function Reserve(){
             <div className="row">
               <span className="section-title">출발지 설정</span>
               <div className="rowBtns">
-                <button type="button" className="btn btn-secondary" onClick={()=>openAddressSearch("from")}>주소검색</button>
-                <button type="button" className="btn btn-ghost" onClick={geolocateToFrom}>현 위치로 불러오기</button>
+                <button type="button" className="btn btn-secondary" onClick={() => openAddressSearch("from")}>
+                  주소검색
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={geolocateToFrom}>
+                  현 위치로 불러오기
+                </button>
               </div>
             </div>
             <div className="addr-grid">
-              <Input label="시/도" value={from.cityDo} onChange={(v)=>setFrom({...from,cityDo:v})}/>
-              <Input label="구/군" value={from.guGun} onChange={(v)=>setFrom({...from,guGun:v})}/>
-              <Input label="동" value={from.dong} onChange={(v)=>setFrom({...from,dong:v})}/>
-              <Input label="번지" value={from.bunji} onChange={(v)=>setFrom({...from,bunji:v})}/>
+              <Input label="시/도" value={from.cityDo} onChange={(v) => setFrom({ ...from, cityDo: v })} />
+              <Input label="구/군" value={from.guGun} onChange={(v) => setFrom({ ...from, guGun: v })} />
+              <Input label="동" value={from.dong} onChange={(v) => setFrom({ ...from, dong: v })} />
+              <Input label="번지" value={from.bunji} onChange={(v) => setFrom({ ...from, bunji: v })} />
             </div>
           </section>
 
@@ -175,37 +267,40 @@ export default function Reserve(){
           <section className="addr-section">
             <div className="row">
               <span className="section-title">어디로 갈까요? (도착지 설정)</span>
-              <button type="button" className="btn btn-secondary" onClick={()=>openAddressSearch("to")}>주소검색</button>
+              <button type="button" className="btn btn-secondary" onClick={() => openAddressSearch("to")}>
+                주소검색
+              </button>
             </div>
             <div className="addr-grid">
-              <Input label="시/도" value={to.cityDo} onChange={(v)=>setTo({...to,cityDo:v})}/>
-              <Input label="구/군" value={to.guGun} onChange={(v)=>setTo({...to,guGun:v})}/>
-              <Input label="동" value={to.dong} onChange={(v)=>setTo({...to,dong:v})}/>
-              <Input label="번지" value={to.bunji} onChange={(v)=>setTo({...to,bunji:v})}/>
+              <Input label="시/도" value={to.cityDo} onChange={(v) => setTo({ ...to, cityDo: v })} />
+              <Input label="구/군" value={to.guGun} onChange={(v) => setTo({ ...to, guGun: v })} />
+              <Input label="동" value={to.dong} onChange={(v) => setTo({ ...to, dong: v })} />
+              <Input label="번지" value={to.bunji} onChange={(v) => setTo({ ...to, bunji: v })} />
             </div>
           </section>
 
           {/* 날짜/시간 */}
           <section className="datetime-section">
-            <Input label="날짜" type="date" value={date} onChange={setDate}/>
-            <Input label="시간" type="time" value={time} onChange={setTime}/>
+            <Input label="날짜" type="date" value={date} onChange={setDate} />
+            <Input label="시간" type="time" value={time} onChange={setTime} />
           </section>
 
-          {/* ✅ 시간 바로 아래 붙는 액션 영역 */}
+          {/* 액션 */}
           <div className="actions">
-            <button type="submit" className="btn btn-primary big">예약하기</button>
+            <button type="submit" className="btn btn-primary big" disabled={submitting}>
+              {submitting ? "예약 중..." : "예약하기"}
+            </button>
           </div>
 
-          {/* 스크롤 끝 안전 여백 */}
-          <div style={{height:"max(env(safe-area-inset-bottom,0),16px)"}} />
+          <div style={{ height: "max(env(safe-area-inset-bottom,0),16px)" }} />
         </form>
       </main>
 
       {/* 주소검색 모달 */}
       {showPostcode && (
-        <div className="pcOverlay" onClick={()=>setShowPostcode(false)}>
-          <div className="pcInner" onClick={(e)=>e.stopPropagation()}>
-            <div ref={postcodeRef} style={{width:"100%",height:"100%"}}/>
+        <div className="pcOverlay" onClick={() => setShowPostcode(false)}>
+          <div className="pcInner" onClick={(e) => e.stopPropagation()}>
+            <div ref={postcodeRef} style={{ width: "100%", height: "100%" }} />
           </div>
         </div>
       )}
@@ -246,7 +341,6 @@ export default function Reserve(){
           display:flex; align-items:center; justify-content:center;
         }
 
-        /* 시간 아래 고정(스크롤 컨테이너 내 sticky) + 배경 그라데이션으로 겹침 방지 */
         .actions{
           position: sticky;
           bottom: 0;
