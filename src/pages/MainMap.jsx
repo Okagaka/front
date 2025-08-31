@@ -571,6 +571,9 @@ export default function MainMap() {
           <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/reserve"); }}>
             <span className="miIcon">📅</span><span>차량 예약</span>
           </button>
+          <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/carpool"); }}>
+            <span className="miIcon">🧑‍🧒‍🧒</span><span>카풀 내역</span>
+          </button>
           <button className="menuItem" onClick={() => { setDrawerOpen(false); nav("/history"); }}>
             <span className="miIcon">🧾</span><span>이용 내역</span>
           </button>
