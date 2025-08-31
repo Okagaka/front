@@ -596,7 +596,7 @@ export default function MainMap() {
         .menuItem .miIcon{ width:24px; text-align:center; font-size:18px; }
         .menuDivider{ border:none; border-top:1px solid #eee; margin:8px 6px; }
         .menuItem.danger{ color:#7b2bd5; font-weight:700; }
-        .searchWrap{ position:absolute; left:12px; right:12px; top:64px; z-index:10; display:flex; flex-direction:column; gap:8px; }
+        .searchWrap{ position:absolute; left:12px; right:12px; top:10px; z-index:10; display:flex; flex-direction:column; gap:8px; }
         .searchBar{ display:flex; align-items:center; gap:8px; background:#fff; border-radius:12px; padding:10px 12px; border:1px solid #e5e6ea; box-shadow:0 6px 18px rgba(0,0,0,.12); }
         .searchBar input{ flex:1; border:none; outline:none; font-size:15px; }
         .pin{ opacity:.7; }
