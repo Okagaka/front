@@ -1,5 +1,5 @@
 // src/layouts/AppShell.jsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 
 export default function AppShell() {
@@ -13,6 +13,17 @@ export default function AppShell() {
   // 마이크 버튼 노출 경로 (지도 화면에서만 노출)
   const showMic = loc.pathname === "/home";
 
+  // 햄버거 버튼 토글
+  const toggleDrawer = () => setDrawerOpen((v) => !v);
+
+  // ESC 키로 닫기 + 라우트 변경 시 닫기(안전장치)
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && setDrawerOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => { setDrawerOpen(false); }, [loc.pathname]);
+
   return (
     <div className="appShell" onClick={() => setDrawerOpen(false)}>
       {/* 헤더 */}
@@ -20,8 +31,9 @@ export default function AppShell() {
         <header className="appBar" onClick={(e) => e.stopPropagation()}>
           <button
             className="iconBtn"
-            aria-label="메뉴 열기"
-            onClick={() => setDrawerOpen(true)}
+            aria-label={drawerOpen ? "메뉴 닫기" : "메뉴 열기"}
+            aria-expanded={drawerOpen}
+            onClick={(e) => { e.stopPropagation(); toggleDrawer(); }}
           >
             ☰
           </button>
@@ -36,7 +48,10 @@ export default function AppShell() {
               className="iconBtn"
               aria-label="말하기"
               title="말하기"
-              onClick={() => window.dispatchEvent(new CustomEvent("app/mic-toggle"))}
+              onClick={(e) => {
+                e.stopPropagation();
+                window.dispatchEvent(new CustomEvent("app/mic-toggle"));
+              }}
             >
               🎤
             </button>
@@ -104,15 +119,15 @@ export default function AppShell() {
       </div>
 
       <style> {`
-          /* 컨테이너 */
-          .appShell{
-            position: relative;
-            min-height: 110dvh;
-            background: #f6f7fb;
-            color:#222;
-            overflow: hidden;        /* 폰 프레임 밖으로 새지 않게 */
-            border-radius: inherit;  /* 부모(.phone) 라운드 따르기 */
-          }
+        /* 컨테이너 */
+        .appShell{
+          position: relative;
+          min-height: 110dvh;
+          background: #f6f7fb;
+          color:#222;
+          overflow: hidden;        /* 폰 프레임 밖으로 새지 않게 */
+          border-radius: inherit;  /* 부모(.phone) 라운드 따르기 */
+        }
 
         /* 헤더 */
         .appBar{

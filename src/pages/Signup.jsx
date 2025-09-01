@@ -14,6 +14,13 @@ function extractBunjiFromData(data) {
   return pick(data?.jibunAddress) || pick(data?.autoJibunAddress) || "";
 }
 
+function formatPhoneView(v = "") {
+  const d = String(v).replace(/\D/g, "");
+  if (d.length === 11) return `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
+  return v || ""; // 길이 안 맞으면 원본 표시
+}
+
 // 파일 상단 유틸에 추가
 const CITY_MAP = {
   "서울": "서울특별시",
@@ -34,7 +41,7 @@ const CITY_MAP = {
   "경남": "경상남도",
   "제주": "제주특별자치도",
 };
-function normalizeCityDo(v='') {
+function normalizeCityDo(v = "") {
   const t = v.trim();
   if (!t) return t;
   // 이미 '특별시/광역시/도/특별자치도/특별자치시'로 끝나면 그대로 사용
@@ -79,26 +86,25 @@ const realApi = {
     return { tempId }; // 프론트는 항상 tempId로 사용
   },
 
-
   // (2) 전화번호 — 이 함수로 교체
   phone: async (tempId, phoneInput) => {
     if (tempId == null) throw new Error("임시 가입 ID가 없어 전화번호를 보낼 수 없어요.");
 
     const toDashed = (v) => {
       const d = String(v || "").replace(/\D/g, "");
-      if (d.length === 11) return `${d.slice(0,3)}-${d.slice(3,7)}-${d.slice(7)}`; // 010-1234-5678
-      if (d.length === 10) return `${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}`; // 010-123-4567
+      if (d.length === 11) return `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}`; // 010-1234-5678
+      if (d.length === 10) return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`; // 010-123-4567
       return v; // 길이가 다르면 원본 유지
     };
 
     const rawInput = typeof phoneInput === "string" ? phoneInput : (phoneInput?.raw ?? "");
-    const dashed   = toDashed(rawInput);
+    const dashed = toDashed(rawInput);
 
     // 백엔드 요구사항: tempId는 쿼리, 전화번호는 하이픈 포함 JSON 바디
-    const url  = `${BASE}/api/signup/phone?tempId=${encodeURIComponent(tempId)}`;
+    const url = `${BASE}/api/signup/phone?tempId=${encodeURIComponent(tempId)}`;
     const body = JSON.stringify({ phoneNumber: dashed });
 
-    const res  = await fetch(url, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body,
@@ -123,7 +129,6 @@ const realApi = {
     try { return JSON.parse(text); } catch { return {}; }
   },
 
-
   // (3) 얼굴 사진 4장 업로드
   // ✅ 이걸로 교체: 파일 4장을 그대로 보냄 (필드명 정확히 imageUrls)
   faces: async (tempId, files) => {
@@ -139,10 +144,7 @@ const realApi = {
     // 절대 Content-Type 수동 지정하지 마세요 (브라우저가 boundary 포함해서 넣음)
     const res = await fetch(
       `${BASE}/api/signup/faces?tempId=${encodeURIComponent(tempId)}`,
-      {
-        method: "POST",
-        body: fd
-      }
+      { method: "POST", body: fd }
     );
 
     // 204(No Content) 대비
@@ -159,28 +161,24 @@ const realApi = {
     return text ? JSON.parse(text) : {};
   },
 
-
   // (4) 영역 등록 (주소)
   zone: async (tempId, payload) => {
     if (tempId == null) throw new Error("임시 가입 ID가 없습니다.");
 
     // 스펙 키 그대로, 깔끔하게 정리해서 전송
     const body = {
-      name:  String(payload.name || "").trim(),
+      name: String(payload.name || "").trim(),
       cityDo: String(payload.cityDo || "").trim(),   // 예: "서울특별시"
-      guGun:  String(payload.guGun || "").trim(),    // 예: "송파구"
-      dong:   String(payload.dong || "").trim(),     // 예: "잠실동"
-      bunji:  String(payload.bunji || "").trim(),    // 예: "123-45"
+      guGun: String(payload.guGun || "").trim(),     // 예: "송파구"
+      dong: String(payload.dong || "").trim(),       // 예: "잠실동"
+      bunji: String(payload.bunji || "").trim(),     // 예: "123-45"
     };
 
     const url = `${BASE}/api/signup/zone?tempId=${encodeURIComponent(tempId)}`;
 
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      },
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(body),
       credentials: "include", // 세션쿠키 쓰면 필요(아니면 있어도 무해)
     });
@@ -191,9 +189,6 @@ const realApi = {
     if (!res.ok) throw new Error(text || `zone HTTP ${res.status}`);
     try { return JSON.parse(text); } catch { return {}; }
   },
-
-
-
 
   // (5-1) 가족 그룹 검색  ← tempId는 query, body는 { familyName }
   familySearch: async (tempId, familyName) => {
@@ -208,7 +203,7 @@ const realApi = {
 
     let raw; try { raw = JSON.parse(text); } catch { raw = {}; }
     // 표준화: { found, familyId }
-    const found    = raw?.data?.exists ?? raw?.exists ?? false;
+    const found = raw?.data?.exists ?? raw?.exists ?? false;
     const familyId = raw?.data?.familyId ?? raw?.familyId ?? null;
     return { found: !!found, familyId };
   },
@@ -238,7 +233,6 @@ const realApi = {
     if (!r.ok) throw new Error(text || `complete HTTP ${r.status}`);
     try { return JSON.parse(text); } catch { return {}; }
   },
-
 };
 
 /** ==============================================
@@ -322,14 +316,14 @@ export default function Signup() {
   // (3) 얼굴 사진 4장
   const [photos, setPhotos] = useState({
     front: { file: null, url: null },
-    left:  { file: null, url: null },
+    left: { file: null, url: null },
     right: { file: null, url: null },
-    up:    { file: null, url: null },
+    up: { file: null, url: null },
   });
   const refFront = useRef(null);
-  const refLeft  = useRef(null);
+  const refLeft = useRef(null);
   const refRight = useRef(null);
-  const refUp    = useRef(null);
+  const refUp = useRef(null);
 
   // ★ 한꺼번에 업로드 input
   const refAll = useRef(null);
@@ -352,7 +346,7 @@ export default function Signup() {
   const [familySearchResult, setFamilySearchResult] = useState(null);
   const [createMode, setCreateMode] = useState(false);
   const [vehicleModel, setVehicleModel] = useState("");
-  const [createAddr, setCreateAddr] = useState({ cityDo:"", guGun:"", dong:"", bunji:"" });
+  const [createAddr, setCreateAddr] = useState({ cityDo: "", guGun: "", dong: "", bunji: "" });
 
   // (6)
   const [finalUser, setFinalUser] = useState(null);
@@ -373,9 +367,9 @@ export default function Signup() {
     const pc = new window.daum.Postcode({
       oncomplete: (data) => {
         // 공통 파싱(지번 기준)
-        const sido   = (data.sido || "").trim();
-        const sigungu= (data.sigungu || "").trim();
-        const bname  = (data.bname || data.bname1 || "").trim();
+        const sido = (data.sido || "").trim();
+        const sigungu = (data.sigungu || "").trim();
+        const bname = (data.bname || data.bname1 || "").trim();
         const bunjiV = extractBunjiFromData(data);
 
         if (pcTarget === "zone") {
@@ -425,7 +419,18 @@ export default function Signup() {
   /* --------------------------------
    * next / back
    * -------------------------------- */
-  const goBack = () => setStep(s => Math.max(1, s-1));
+  const goBack = () => setStep(s => Math.max(1, s - 1));
+
+  // 항상 보이는 뒤로가기 버튼 핸들러
+  const handleBack = () => {
+    if (step > 1) {
+      setStep((s) => Math.max(1, s - 1));
+    } else {
+      if (window.history.length > 1) nav(-1);
+      else nav("/");
+    }
+  };
+
   const goNext = async () => {
     try {
       setError(""); setLoading(true);
@@ -433,7 +438,7 @@ export default function Signup() {
         if (!name.trim()) throw new Error("이름을 입력해 주세요.");
         const { tempId } = await API.name(name.trim());
         setTempId(tempId);
-        try { sessionStorage.setItem("signup_tempId", String(tempId)); } catch {}
+        try { sessionStorage.setItem("signup_tempId", String(tempId)); } catch { }
         setStep(2);
       }
       else if (step === 2) {
@@ -454,16 +459,16 @@ export default function Signup() {
         const files = FACE_KEYS.map(k => photos[k].file).filter(Boolean);
         if (files.length !== 4) throw new Error("얼굴 사진 4장을 모두 업로드해 주세요.");
 
-        console.log("faces files:", files.map(f => ({ name:f.name, type:f.type, size:f.size })));
+        console.log("faces files:", files.map(f => ({ name: f.name, type: f.type, size: f.size })));
         await API.faces(tempId, files);
         setStep(4);
       }
 
       else if (step === 4) {
         if (!zoneName.trim()) throw new Error("영역 이름을 입력해 주세요. (예: 우리집)");
-        if (!cityDo.trim())   throw new Error("시/도를 입력해 주세요. (예: 서울특별시)");
-        if (!guGun.trim())    throw new Error("구/군을 입력해 주세요. (예: 용산구)");
-        if (!dong.trim())     throw new Error("동을 입력해 주세요. (예: 효창동)");
+        if (!cityDo.trim()) throw new Error("시/도를 입력해 주세요. (예: 서울특별시)");
+        if (!guGun.trim()) throw new Error("구/군을 입력해 주세요. (예: 용산구)");
+        if (!dong.trim()) throw new Error("동을 입력해 주세요. (예: 효창동)");
         if (!/^\d{1,5}(-\d{1,4})?$/.test(bunji.trim()))
           throw new Error("번지는 숫자 또는 숫자-숫자 형식으로 입력해 주세요. (예: 1605 또는 123-45)");
 
@@ -480,9 +485,7 @@ export default function Signup() {
         setStep(5);
       }
 
-
-      
-      else if (step===5) {
+      else if (step === 5) {
         if (!createMode) {
           if (!familyName.trim()) throw new Error("가족 이름을 입력해 주세요.");
           const res = await API.familySearch(tempId, familyName.trim());
@@ -498,14 +501,18 @@ export default function Signup() {
           const { cityDo, guGun, dong, bunji } = createAddr;
           if (!cityDo.trim() || !guGun.trim() || !dong.trim() || !bunji.trim())
             throw new Error("가족 주소(시/도, 구/군, 동, 번지)를 모두 입력해 주세요.");
-          await API.familyCreate(tempId, { familyName: familyName.trim(), vehicleModel: vehicleModel.trim(), cityDo, guGun, dong, bunji });
+          await API.familyCreate(tempId, {
+            familyName: familyName.trim(),
+            vehicleModel: vehicleModel.trim(),
+            cityDo, guGun, dong, bunji
+          });
           const user = await API.complete(tempId); setFinalUser(user); setStep(6);
         }
-      } else if (step===6) {
+      } else if (step === 6) {
         nav("/");
       }
-    } catch(e){ setError(e.message || String(e)); }
-    finally{ setLoading(false); }
+    } catch (e) { setError(e.message || String(e)); }
+    finally { setLoading(false); }
   };
 
   /* --------------------------------
@@ -537,107 +544,118 @@ export default function Signup() {
     <div className="wrap">
       <div className="card signup">
         <div className="header">
-          {step>1 ? (<button className="iconBtn backBtn" aria-label="뒤로" onClick={goBack}>←</button>) : <span/>}
-          <div className="stepTitle">회원가입 ({step}/6)</div><span/>
+          <button className="iconBtn backBtn" aria-label="뒤로" onClick={handleBack}>←</button>
+          <div className="stepTitle">회원가입 ({step}/6)</div><span />
         </div>
 
         <div className="logoArea"><span className="car">🚗</span><h1 className="brand">오카가카</h1></div>
 
         <div className="screen">
-          {step===1 && (<>
+          {step === 1 && (<>
             <label className="label">이름</label>
             <input className="input" placeholder="이름(예: 김눈송)" value={name}
-                   onChange={(e)=>setName(e.target.value)} autoComplete="name" />
+              onChange={(e) => setName(e.target.value)} autoComplete="name" />
           </>)}
 
-          {step===2 && (<>
+          {step === 2 && (<>
             <label className="label">전화번호</label>
             <input className="input" placeholder="전화번호(예: 010-1234-5678)" value={phoneNumber}
-                   onChange={(e)=>setPhoneNumber(e.target.value)} inputMode="tel" autoComplete="tel" />
+              onChange={(e) => setPhoneNumber(e.target.value)} inputMode="tel" autoComplete="tel" />
           </>)}
 
-          {step===3 && (<>
+          {step === 3 && (<>
             <div className="sectionTitle">본인 얼굴 사진 업로드 (4장)</div>
-            <div style={{marginBottom:8}}>
-              <button type="button" className="ghostBtn" onClick={()=>refAll.current?.click()}>사진 4장 한꺼번에 업로드</button>
-              <input ref={refAll} type="file" accept="image/*" multiple hidden onChange={(e)=>onPickAll(e.target.files)} />
-              <div className="hint" style={{marginTop:6}}>선택 순서대로 <b>정면 → 왼쪽 → 오른쪽 → 위쪽</b>에 자동 배치돼요.</div>
+            <div style={{ marginBottom: 8 }}>
+              <button type="button" className="ghostBtn" onClick={() => refAll.current?.click()}>사진 4장 한꺼번에 업로드</button>
+              <input ref={refAll} type="file" accept="image/*" multiple hidden onChange={(e) => onPickAll(e.target.files)} />
+              <div className="hint" style={{ marginTop: 6 }}>선택 순서대로 <b>정면 → 왼쪽 → 오른쪽 → 위쪽</b>에 자동 배치돼요.</div>
             </div>
             <div className="grid4">
-              <UploadBox label="정면"  refInput={refFront} photoKey="front" />
-              <UploadBox label="왼쪽"  refInput={refLeft}  photoKey="left" />
+              <UploadBox label="정면" refInput={refFront} photoKey="front" />
+              <UploadBox label="왼쪽" refInput={refLeft} photoKey="left" />
               <UploadBox label="오른쪽" refInput={refRight} photoKey="right" />
-              <UploadBox label="위쪽"  refInput={refUp}    photoKey="up" />
+              <UploadBox label="위쪽" refInput={refUp} photoKey="up" />
             </div>
           </>)}
 
-          {step===4 && (<>
+          {step === 4 && (<>
             <div className="sectionTitle">자주 이용하는 장소 (영역)</div>
             <label className="label">영역 이름</label>
-            <input className="input" placeholder="예: 우리집" value={zoneName} onChange={(e)=>setZoneName(e.target.value)} />
-            <div style={{display:"flex", margin:"8px 0"}}>
-              <button type="button" className="ghostBtn" onClick={()=>openAddressSearch("zone")} style={{width:"auto"}}>주소 검색</button>
+            <input className="input" placeholder="예: 우리집" value={zoneName} onChange={(e) => setZoneName(e.target.value)} />
+            <div style={{ display: "flex", margin: "8px 0" }}>
+              <button type="button" className="ghostBtn" onClick={() => openAddressSearch("zone")} style={{ width: "auto" }}>주소 검색</button>
             </div>
             <label className="label">시/도</label>
-            <input className="input" value={cityDo} onChange={(e)=>setCityDo(e.target.value)} placeholder="예: 서울특별시" />
+            <input className="input" value={cityDo} onChange={(e) => setCityDo(e.target.value)} placeholder="예: 서울특별시" />
             <label className="label">구/군</label>
-            <input className="input" value={guGun} onChange={(e)=>setGuGun(e.target.value)} placeholder="예: 성동구" />
+            <input className="input" value={guGun} onChange={(e) => setGuGun(e.target.value)} placeholder="예: 성동구" />
             <label className="label">동</label>
-            <input className="input" value={dong} onChange={(e)=>setDong(e.target.value)} placeholder="예: 하왕십리동" />
+            <input className="input" value={dong} onChange={(e) => setDong(e.target.value)} placeholder="예: 하왕십리동" />
             <label className="label">번지</label>
-            <input className="input" value={bunji} onChange={(e)=>setBunji(e.target.value)} placeholder="예: 73 또는 73-1" />
+            <input className="input" value={bunji} onChange={(e) => setBunji(e.target.value)} placeholder="예: 73 또는 73-1" />
           </>)}
 
-          {step===5 && (<>
+          {step === 5 && (<>
             {!createMode ? (
               <>
                 <div className="sectionTitle">가족 그룹 검색</div>
                 <label className="label">가족 이름</label>
                 <input className="input" placeholder="예: 김씨네" value={familyName}
-                       onChange={(e)=>{ setFamilyName(e.target.value); setFamilySearchResult(null); }} />
+                  onChange={(e) => { setFamilyName(e.target.value); setFamilySearchResult(null); }} />
                 {familySearchResult && (
                   <div className="hintBox">
                     {familySearchResult.found ? `가족 그룹을 찾았습니다. (ID: ${familySearchResult.familyId})` : "해당 이름의 가족 그룹이 없습니다. 새로 생성해 주세요."}
                   </div>
                 )}
-                <button className="ghostBtn" type="button" onClick={()=>setCreateMode(true)}>가족 그룹이 없으신가요? 새로 생성</button>
+                <button className="ghostBtn" type="button" onClick={() => setCreateMode(true)}>가족 그룹이 없으신가요? 새로 생성</button>
               </>
             ) : (
               <>
                 <div className="sectionTitle">가족 그룹 생성</div>
                 <label className="label">가족 이름</label>
-                <input className="input" value={familyName} onChange={(e)=>setFamilyName(e.target.value)} placeholder="예: 김씨네" />
+                <input className="input" value={familyName} onChange={(e) => setFamilyName(e.target.value)} placeholder="예: 김씨네" />
                 <label className="label">차 모델명</label>
-                <input className="input" value={vehicleModel} onChange={(e)=>setVehicleModel(e.target.value)} placeholder="예: 카니발" />
+                <input className="input" value={vehicleModel} onChange={(e) => setVehicleModel(e.target.value)} placeholder="예: 카니발" />
 
-                <div className="subTitle" style={{display:"flex", alignItems:"center", justifyContent:"space-between"}}>
+                <div className="subTitle" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                   <span>가족 주소</span>
-                  <button type="button" className="ghostBtn" onClick={()=>openAddressSearch("family")} style={{width:"auto"}}>주소 검색</button>
+                  <button type="button" className="ghostBtn" onClick={() => openAddressSearch("family")} style={{ width: "auto" }}>주소 검색</button>
                 </div>
                 <label className="label">시/도</label>
-                <input className="input" value={createAddr.cityDo} onChange={(e)=>setCreateAddr(v=>({...v, cityDo:e.target.value}))} />
+                <input className="input" value={createAddr.cityDo} onChange={(e) => setCreateAddr(v => ({ ...v, cityDo: e.target.value }))} />
                 <label className="label">구/군</label>
-                <input className="input" value={createAddr.guGun} onChange={(e)=>setCreateAddr(v=>({...v, guGun:e.target.value}))} />
+                <input className="input" value={createAddr.guGun} onChange={(e) => setCreateAddr(v => ({ ...v, guGun: e.target.value }))} />
                 <label className="label">동</label>
-                <input className="input" value={createAddr.dong} onChange={(e)=>setCreateAddr(v=>({...v, dong:e.target.value}))} />
+                <input className="input" value={createAddr.dong} onChange={(e) => setCreateAddr(v => ({ ...v, dong: e.target.value }))} />
                 <label className="label">번지</label>
-                <input className="input" value={createAddr.bunji} onChange={(e)=>setCreateAddr(v=>({...v, bunji:e.target.value}))} placeholder="예: 123-45" />
+                <input className="input" value={createAddr.bunji} onChange={(e) => setCreateAddr(v => ({ ...v, bunji: e.target.value }))} placeholder="예: 123-45" />
 
-                <button className="ghostBtn" type="button" onClick={()=>setCreateMode(false)}>⇦ 검색으로 돌아가기</button>
+                <button className="ghostBtn" type="button" onClick={() => setCreateMode(false)}>⇦ 검색으로 돌아가기</button>
               </>
             )}
           </>)}
 
-          {step===6 && (<>
-            <div className="sectionTitle">회원가입 완료</div>
-            {finalUser ? (
-              <div className="resultBox">
-                <div><b>이름</b> {finalUser.userName}</div>
-                <div><b>전화</b> {finalUser.phoneNumber}</div>
-              </div>
-            ) : (<div className="hint">완료 정보를 불러왔습니다.</div>)}
-            <div className="hint">확인을 누르면 홈으로 이동합니다.</div>
-          </>)}
+          {step === 6 && (() => {
+            const displayName = (finalUser?.userName ?? name)?.trim();
+            const displayPhone = formatPhoneView(finalUser?.phoneNumber ?? phoneNumber);
+
+            return (
+              <>
+                <div className="sectionTitle">회원가입 완료</div>
+                <div className="resultBox resultPairs">
+                  <div className="pair">
+                    <span className="k">이름</span>
+                    <span className="v">{displayName || '-'}</span>
+                  </div>
+                  <div className="pair">
+                    <span className="k">전화번호</span>
+                    <span className="v">{displayPhone || '-'}</span>
+                  </div>
+                </div>
+                <div className="hint">확인을 누르면 홈으로 이동합니다.</div>
+              </>
+            );
+          })()}
 
           {error && <p className="error">{error}</p>}
 
@@ -651,17 +669,37 @@ export default function Signup() {
 
       {/* 주소검색 오버레이(공용) */}
       {showPostcode && (
-        <div className="pcOverlay" onClick={()=>setShowPostcode(false)}>
-          <div className="pcInner" onClick={(e)=>e.stopPropagation()}>
-            <div ref={postcodeRef} style={{width:"100%", height:"100%"}} />
+        <div className="pcOverlay" onClick={() => setShowPostcode(false)}>
+          <div className="pcInner" onClick={(e) => e.stopPropagation()}>
+            <div ref={postcodeRef} style={{ width: "100%", height: "100%" }} />
           </div>
         </div>
       )}
 
       <style>{`
-        .card.signup { height: 100vh; overflow-y: auto; }
-        .screen { padding-bottom: 120px; }
-        .formFooter { margin-top: 16px; padding-bottom: 8px; }
+        .card.signup {
+          height: 100vh;
+          overflow-y: auto;        /* 자체 스크롤 */
+          display: flex;
+          flex-direction: column;
+        }
+        .screen {
+          flex: 1;
+          padding-bottom: 140px;   /* 하단 버튼 높이만큼 확보 */
+        }
+        .formFooter {
+          position: sticky;
+          bottom: 0;
+          z-index: 20;
+          background: #fff;
+          padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+          box-shadow: 0 -8px 24px rgba(0,0,0,.08);
+          border-top: 1px solid #eee;
+        }
+        .primaryBtn {
+          width: 100%;
+        }
+
         .header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
         .stepTitle{ font-weight:700; color:#6a34d6; }
         .grid4{ display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin:8px 0 16px; }
@@ -674,6 +712,27 @@ export default function Signup() {
         .hint{ color:#666; font-size:13px; }
         .pcOverlay{ position: fixed; inset: 0; background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center; z-index:99999; }
         .pcInner{ width:min(720px, 92vw); height:min(620px, 82vh); background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.25); }
+
+        /* 완료 섹션: 라벨-값 정렬 + 콜론 간격 */
+        .resultPairs { display: grid; gap: 10px; }
+        .pair { display: flex; align-items: center; }
+        .pair .k::after {
+          content: ":";
+          display: inline-block;
+          padding: 0 10px 0 8px; /* 콜론 앞/뒤 여백 */
+          color: #999;
+        }
+        .pair .v { font-weight: 700; }
+
+        /* (선택) 뒤로 버튼 스타일이 필요하면 */
+        .iconBtn.backBtn {
+          border: none;
+          background: transparent;
+          font-size: 20px;
+          line-height: 1;
+          padding: 6px 8px;
+          cursor: pointer;
+        }
       `}</style>
     </div>
   );
