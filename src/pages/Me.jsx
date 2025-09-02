@@ -34,7 +34,6 @@ function getAuthFallback() {
 
 /** 값 보조 */
 const pick = (...cands) => cands.find((v) => v != null && v !== "") ?? "";
-const normTime = (s) => (s ? String(s) : "");
 const safeArr = (a) => (Array.isArray(a) ? a : a ? [a] : []);
 
 /** 얼굴사진 4장 만들기 */
@@ -57,27 +56,15 @@ function collectFacePhotos(p) {
 
 /** 주소 추출(영역/집) */
 function extractRegion(p) {
-  const areaName =
-    pick(p?.areaName, p?.regionName, p?.zoneName, p?.groupName) || "";
-  const cityDo = pick(
-    p?.cityDo, p?.sido, p?.region1, p?.region_1depth_name
-  );
-  const guGun = pick(
-    p?.guGun, p?.sigungu, p?.region2, p?.region_2depth_name
-  );
-  const dong = pick(
-    p?.dong, p?.bname, p?.region3, p?.region_3depth_name
-  );
-  const bunji = pick(
-    p?.bunji, p?.lotNumber, p?.addrNo, p?.number
-  );
+  const areaName = pick(p?.areaName, p?.regionName, p?.zoneName, p?.groupName) || "";
+  const cityDo   = pick(p?.cityDo, p?.sido, p?.region1, p?.region_1depth_name);
+  const guGun    = pick(p?.guGun, p?.sigungu, p?.region2, p?.region_2depth_name);
+  const dong     = pick(p?.dong, p?.bname,  p?.region3, p?.region_3depth_name);
+  const bunji    = pick(p?.bunji, p?.lotNumber, p?.addrNo, p?.number);
   return { areaName, cityDo, guGun, dong, bunji };
 }
-
 function extractHome(p) {
-  const home =
-    pick(p?.homeAddress, p?.address, p?.addr, p?.jibunAddress, p?.roadAddress) || "";
-  return home;
+  return pick(p?.homeAddress, p?.address, p?.addr, p?.jibunAddress, p?.roadAddress) || "";
 }
 
 export default function Me() {
@@ -108,36 +95,22 @@ export default function Me() {
           const data = await res.json();
           const p = data?.data ?? data;
 
-          const name = pick(p?.name, p?.username, p?.displayName, authFallback.name);
-          const phone = pick(p?.phone, p?.phoneNumber, p?.mobile, authFallback.phone);
-          const faces = collectFacePhotos(p);
-          const region = extractRegion(p?.region ?? p?.area ?? p);
-          const familyName = pick(
-            p?.familyName, p?.family?.name, p?.group?.name, p?.householdName
-          );
+          const name        = pick(p?.name, p?.username, p?.displayName, authFallback.name);
+          const phone       = pick(p?.phone, p?.phoneNumber, p?.mobile, authFallback.phone);
+          const faces       = collectFacePhotos(p);
+          const region      = extractRegion(p?.region ?? p?.area ?? p);
+          const familyName  = pick(p?.familyName, p?.family?.name, p?.group?.name, p?.householdName);
           const homeAddress = extractHome(p?.home ?? p);
-          const carModel = pick(
-            p?.carModel, p?.vehicleModel, p?.car?.model, p?.vehicle?.modelName
-          );
+          const carModel    = pick(p?.carModel, p?.vehicleModel, p?.car?.model, p?.vehicle?.modelName);
 
           setProfile({
-            name,
-            phone,
-            faces,
-            areaName: region.areaName,
-            cityDo: region.cityDo,
-            guGun: region.guGun,
-            dong: region.dong,
-            bunji: region.bunji,
-            familyName,
-            homeAddress,
-            carModel,
+            name, phone, faces,
+            areaName: region.areaName, cityDo: region.cityDo, guGun: region.guGun, dong: region.dong, bunji: region.bunji,
+            familyName, homeAddress, carModel,
           });
           setLoading(false);
           return;
-        } catch {
-          // 다음 후보로
-        }
+        } catch { /* 다음 후보로 */ }
       }
 
       setErr("서버에서 프로필 정보를 불러오지 못했습니다. (로그인 토큰/권한 확인 필요)");
@@ -148,100 +121,93 @@ export default function Me() {
   }, [authFallback.name, authFallback.phone]);
 
   const {
-    name = "",
-    phone = "",
-    faces = [null, null, null, null],
-    areaName = "",
-    cityDo = "",
-    guGun = "",
-    dong = "",
-    bunji = "",
-    familyName = "",
-    homeAddress = "",
-    carModel = "",
+    name = "", phone = "", faces = [null, null, null, null],
+    areaName = "", cityDo = "", guGun = "", dong = "", bunji = "",
+    familyName = "", homeAddress = "", carModel = "",
   } = profile || {};
 
   return (
     <div className="meRoot">
-      {/* 이 안쪽이 독립 스크롤 컨테이너 */}
+      {/* 독립 스크롤 컨테이너 */}
       <div className="meScroll">
-        <div className="meWrap">
-          <h1 className="title">내 정보</h1>
+        {/* 화면 높이가 작을수록 자동 축소되는 래퍼 */}
+        <div className="meScale">
+          <div className="meWrap">
+            <h1 className="title">내 정보</h1>
 
-          {loading && <div className="hint">불러오는 중…</div>}
-          {!loading && err && <div className="error">⚠ {err}</div>}
+            {loading && <div className="hint">불러오는 중…</div>}
+            {!loading && err && <div className="error">⚠ {err}</div>}
 
-          <section className="card">
-            <h2 className="secTitle">기본 정보</h2>
-            <div className="grid2">
-              <div className="kv">
-                <div className="k">이름</div>
-                <div className="v">{name || "-"}</div>
+            <section className="card">
+              <h2 className="secTitle">기본 정보</h2>
+              <div className="grid2">
+                <div className="kv">
+                  <div className="k">이름</div>
+                  <div className="v">{name || "-"}</div>
+                </div>
+                <div className="kv">
+                  <div className="k">전화번호</div>
+                  <div className="v">{phone || "-"}</div>
+                </div>
               </div>
-              <div className="kv">
-                <div className="k">전화번호</div>
-                <div className="v">{phone || "-"}</div>
+            </section>
+
+            <section className="card">
+              <h2 className="secTitle">얼굴 사진 (4장)</h2>
+              <div className="faces">
+                {faces.map((url, idx) => (<FaceBox key={idx} url={url} />))}
               </div>
-            </div>
-          </section>
+            </section>
 
-          <section className="card">
-            <h2 className="secTitle">얼굴 사진 (4장)</h2>
-            <div className="faces">
-              {faces.map((url, idx) => (
-                <FaceBox key={idx} url={url} />
-              ))}
-            </div>
-          </section>
+            <section className="card">
+              <h2 className="secTitle">영역 정보</h2>
+              <div className="kv">
+                <div className="k">영역 이름</div>
+                <div className="v">{areaName || "-"}</div>
+              </div>
+              <div className="addrGrid">
+                <AddrItem label="시/도" value={cityDo} />
+                <AddrItem label="구/군" value={guGun} />
+                <AddrItem label="동" value={dong} />
+                <AddrItem label="번지" value={bunji} />
+              </div>
+            </section>
 
-          <section className="card">
-            <h2 className="secTitle">영역 정보</h2>
-            <div className="kv">
-              <div className="k">영역 이름</div>
-              <div className="v">{areaName || "-"}</div>
-            </div>
-            <div className="addrGrid">
-              <AddrItem label="시/도" value={cityDo} />
-              <AddrItem label="구/군" value={guGun} />
-              <AddrItem label="동" value={dong} />
-              <AddrItem label="번지" value={bunji} />
-            </div>
-          </section>
-
-          <section className="card">
-            <h2 className="secTitle">가족 / 거주 / 차량</h2>
-            <div className="kv">
-              <div className="k">가족 이름</div>
-              <div className="v">{familyName || "-"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">집 주소</div>
-              <div className="v">{homeAddress || "-"}</div>
-            </div>
-            <div className="kv">
-              <div className="k">차 모델명</div>
-              <div className="v">{carModel || "-"}</div>
-            </div>
-          </section>
+            <section className="card">
+              <h2 className="secTitle">가족 / 거주 / 차량</h2>
+              <div className="kv"><div className="k">가족 이름</div><div className="v">{familyName || "-"}</div></div>
+              <div className="kv"><div className="k">집 주소</div><div className="v">{homeAddress || "-"}</div></div>
+              <div className="kv"><div className="k">차 모델명</div><div className="v">{carModel || "-"}</div></div>
+            </section>
+          </div>
         </div>
       </div>
 
       <style>{`
-        /* ===== 스크롤 레이아웃 =====
-           AppShell이 overflow:hidden이기 때문에
-           페이지 내부에 별도 스크롤 컨테이너를 둔다. */
-        .meRoot{
-          /* AppShell 헤더 높이(56px)를 고려해 뷰포트 높이에서 차감 */
-          --app-header-h: 56px;
-          height: 100%;
-        }
+        /* ===== 스크롤 레이아웃 ===== */
+        .meRoot{ --app-header-h:56px; height:100%; }
         .meScroll{
           height: calc(100dvh - var(--app-header-h));
-          overflow-y: auto;
+          overflow-y:auto;
           -webkit-overflow-scrolling: touch;
           overscroll-behavior: contain;
           padding: 8px 0 max(16px, env(safe-area-inset-bottom));
         }
+
+        /* ===== 축소(스케일) 컨테이너 =====
+           화면 높이가 작아질수록 단계적으로 스케일을 낮춘다.
+           80% 줌(=실질 높이 감소)에서도 전체가 더 잘 보임. */
+        .meScale{
+          --scale: 1;
+          transform: scale(var(--scale));
+          transform-origin: top center;
+          width: calc(100% / var(--scale));  /* 스케일에 따른 가로 보정 */
+          margin: 0 auto;
+        }
+        @media (max-height: 900px){ .meScale{ --scale: .95; } }
+        @media (max-height: 820px){ .meScale{ --scale: .9; } }
+        @media (max-height: 740px){ .meScale{ --scale: .85; } }
+        @media (max-height: 680px){ .meScale{ --scale: .8; } }  /* ← 80% 구간 */
 
         .meWrap{ padding:16px; max-width:720px; margin:0 auto; }
         .title{ font-weight:800; font-size:22px; text-align:center; margin:8px 0 14px; }
@@ -303,15 +269,11 @@ export default function Me() {
 function FaceBox({ url }) {
   if (!url) {
     return (
-      <div className="faceBox">
-        <div className="facePh">+</div>
-      </div>
+      <div className="faceBox"><div className="facePh">+</div></div>
     );
   }
   return (
-    <div className="faceBox">
-      <img src={url} alt="사용자 얼굴" />
-    </div>
+    <div className="faceBox"><img src={url} alt="사용자 얼굴" /></div>
   );
 }
 

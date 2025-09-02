@@ -2,6 +2,8 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
+
+
 /* =========================
    상수 & JWT/URL 유틸
    ========================= */
@@ -16,7 +18,7 @@ const getJwt = () => {
   try {
     return (
       sessionStorage.getItem("jwt") ||
-      localStorage.getItem("accessToken") || // ★ Login.jsx에서 저장
+      localStorage.getItem("accessToken") ||
       (JSON.parse(sessionStorage.getItem("auth") || "{}")?.token) ||
       process.env.REACT_APP_TEST_JWT ||
       ""
@@ -25,6 +27,7 @@ const getJwt = () => {
     return localStorage.getItem("accessToken") || "";
   }
 };
+
 
 /* =========================
    브라우저 마이크 → 16kHz WAV
@@ -144,6 +147,10 @@ export default function MainMap() {
   const [recState, setRecState] = useState("idle"); // idle | recording | uploading
   const uploadAbortRef = useRef(null);
 
+  /* ===== 시간 비교 카드(모달) 상태 ===== */
+  const [compare, setCompare] = useState(null);
+  // compare = { carMin, transitMin }
+
   /* === 녹음 시작 === */
   const startRecording = useCallback(async () => {
     if (recState !== "idle") return;
@@ -162,7 +169,7 @@ export default function MainMap() {
     }
   }, [recState]);
 
-  /* === 녹음 종료 + 업로드 (FormData file=.wav + Authorization) === */
+  /* === 녹음 종료 + 업로드 === */
   const stopAndTranscribe = useCallback(async () => {
     if (recState !== "recording" || !recorder) return;
     try {
@@ -170,11 +177,7 @@ export default function MainMap() {
       setStatus("음성 업로드 중…");
 
       const wavBlob = await recorder.stop();
-      // FormData에 .wav 파일로 첨부 (파일명 확장자 꼭 .wav)
       const wavFile = new File([wavBlob], "speech.wav", { type: "audio/wav" });
-
-      // 디버그: 크기/유형 확인
-      console.log(`[WAV] size: ${wavFile.size} bytes, type: ${wavFile.type}`);
 
       const token = getJwt();
       if (!token) {
@@ -184,29 +187,24 @@ export default function MainMap() {
       }
 
       const form = new FormData();
-      form.append("file", wavFile); // ★ 서버 명세: 필드명은 정확히 'file'
+      form.append("file", wavFile);
 
       const controller = new AbortController();
       uploadAbortRef.current = controller;
 
       const res = await fetch(STT_URL, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`, // ★ 오직 Authorization만 설정
-          // Content-Type은 설정하지 않음(FormData가 boundary 포함해서 자동 설정)
-        },
+        headers: { Authorization: `Bearer ${token}` },
         body: form,
         signal: controller.signal,
       });
 
-      // 5xx는 서버 문제라 텍스트 먼저 확인
       if (res.status >= 500) {
         alert("서버 내부 오류가 발생했습니다. (STT)\n개발자 콘솔 로그를 확인해 주세요.");
         setStatus("");
         return;
       }
 
-      // 보통 JSON: { status:200, message:"...", data:"문장" }
       let payload;
       try { payload = await res.json(); }
       catch { payload = { message: "Invalid JSON", data: "" }; }
@@ -236,28 +234,16 @@ export default function MainMap() {
     }
   }, [recState, recorder]);
 
-  // 8초 자동 종료
+  // 전역 마이크 토글
   useEffect(() => {
     const onToggle = () => {
-      if (recState === "idle") {
-        startRecording();
-      } else if (recState === "recording") {
-        stopAndTranscribe();
-      } else if (recState === "uploading") {
-        // 업로드 중이면 취소(선택 사항)
-        uploadAbortRef.current?.abort();
-      }
+      if (recState === "idle")      startRecording();
+      else if (recState === "recording") stopAndTranscribe();
+      else if (recState === "uploading") uploadAbortRef.current?.abort();
     };
     window.addEventListener("app/mic-toggle", onToggle);
     return () => window.removeEventListener("app/mic-toggle", onToggle);
   }, [recState, startRecording, stopAndTranscribe]);
-  // // 🎤 버튼 토글
-  // const onMicClick = async (e) => {
-  //   e.stopPropagation();
-  //   if (recState === "idle") return startRecording();
-  //   if (recState === "recording") return stopAndTranscribe();
-  //   if (recState === "uploading") uploadAbortRef.current?.abort();
-  // };
 
   /* ===== 로그인 정보 수신/복구 ===== */
   useEffect(() => {
@@ -403,7 +389,7 @@ export default function MainMap() {
     return () => clearTimeout(debounceRef.current);
   }, [query]);
 
-  /* ───────────── 목적지 선택 시 경로 ───────────── */
+  /* ───────────── 목적지 선택 시 경로 & 시간비교 ───────────── */
   useEffect(() => {
     if (!selectedPlace) return;
     const map = mapRef.current;
@@ -420,7 +406,10 @@ export default function MainMap() {
       });
     } catch (e) { console.error("목적지 마커 오류:", e); }
 
-    if (herePos) drawRoute(herePos, { lat: selectedPlace.lat, lon: selectedPlace.lon });
+    if (herePos) {
+      drawRoute(herePos, { lat: selectedPlace.lat, lon: selectedPlace.lon });
+      openCompare(selectedPlace); // ⬅️ 선택 즉시 시간 비교
+    }
   }, [selectedPlace, herePos]);
 
   /* ───────────── 차량→나 경로 ───────────── */
@@ -534,6 +523,17 @@ export default function MainMap() {
     } catch (e) { console.error("차→나 경로 그리기 실패:", e); }
   };
 
+  /* ===== 목적지 선택 시 모달에 보여줄 시간 계산(모의) ===== */
+  const openCompare = (dest) => {
+    if (!herePos || !dest) return;
+    const dLat = Math.abs(herePos.lat - dest.lat);
+    const dLon = Math.abs(herePos.lon - dest.lon);
+    const km = Math.sqrt(dLat*dLat + dLon*dLon) * 111;
+    const carMin = Math.max(7, Math.round(km * 3.5));
+    const transitMin = Math.max(10, Math.round(km * 2.8) + 8);
+    setCompare({ carMin, transitMin });
+  };
+
   /* ───────────── 핸들러/뷰 ───────────── */
   const pickResult = (item) => {
     setQuery(item.name); setOpen(false);
@@ -544,6 +544,7 @@ export default function MainMap() {
     setQuery(""); setResults([]); setOpen(false); setSelectedPlace(null); setStatus("");
     if (destMarkerRef.current) { destMarkerRef.current.setMap(null); destMarkerRef.current = null; }
     if (routeLineRef.current) { routeLineRef.current.halo?.setMap(null); routeLineRef.current.main?.setMap(null); routeLineRef.current = null; }
+    setCompare(null);
   };
 
   return (
@@ -576,26 +577,43 @@ export default function MainMap() {
       <div className="mapCanvas" ref={mapDivRef} />
       {status && <div className="mapStatus">{status}</div>}
 
+      {/* ==== 시간 비교 카드(모달) ==== */}
+      {compare && (
+        <div className="cmpOverlay" onClick={() => setCompare(null)}>
+          <div className="cmpCard" onClick={(e)=>e.stopPropagation()}>
+            <div className="cmpHandle" />
+            <div className="cmpTitle">도착지까지 걸리는 시간</div>
+            <hr className="cmpDiv" />
+            <div className="cmpRow">
+              <span>🚗 차량 도착 및 이동 시간</span>
+              <b>{compare.carMin}분</b>
+            </div>
+            <hr className="cmpDiv" />
+            <div className="cmpRow">
+              <span>🚇 대중교통 이용 시간</span>
+              <b>{compare.transitMin}분</b>
+            </div>
+            <hr className="cmpDiv" />
+            <div className="cmpGuide">
+              차량 이용을 원하시면 <b>좌측 상단 메뉴에서 예약</b>해주세요.
+            </div>
+            <button className="cmpOK" onClick={() => setCompare(null)}>확인</button>
+          </div>
+        </div>
+      )}
+
       <style>{`
-        .mainShell{ min-height:100dvh; display:flex; flex-direction:column; position:relative; overflow:hidden; }
-        .appBar{ height:56px; background:#6a34d6; color:#fff; padding:0 12px; display:flex; align-items:center; gap:12px; }
-        .appTitle{ flex:1; text-align:center; font-weight:800; letter-spacing:.5px; }
-        .appIcon{ width:40px; height:40px; border:none; background:transparent; color:#fff; font-size:22px; cursor:pointer; }
+        /* 화면 자체를 "폰 폭"으로 고정 */
+        .mainShell{
+          min-height:100dvh;
+          display:flex; flex-direction:column;
+          position:relative; overflow:hidden;
+          max-width:420px; margin:0 auto;
+          border-radius:22px;
+        }
         .mapCanvas{ flex:1; }
         .mapStatus{ position:absolute; top:64px; left:0; right:0; text-align:center; font-weight:700; color:#555; }
-        .backdrop{ position:absolute; inset:0; background:rgba(0,0,0,0); opacity:0; pointer-events:none; transition:opacity .2s; z-index:40; border-radius:inherit; }
-        .backdrop.show{ opacity:.35; background:rgba(0,0,0,.45); pointer-events:auto; }
-        .drawer{ position:absolute; top:0; bottom:0; left:0; width:min(78vw,320px); background:#fff; box-shadow:6px 0 22px rgba(0,0,0,.18);
-                 transform:translateX(-110%); transition:transform .22s; z-index:50; display:flex; flex-direction:column; }
-        .drawerHeader{ display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid #f0f0f3; }
-        .brandRow{ display:flex; align-items:center; gap:8px; font-size:16px; }
-        .closeBtn{ width:36px; height:36px; border:none; border-radius:10px; background:#f5f5f7; font-size:20px; cursor:pointer; }
-        .menuList{ padding:8px 6px; display:flex; flex-direction:column; gap:2px; }
-        .menuItem{ display:flex; align-items:center; gap:12px; width:100%; padding:12px; background:#fff; border:none; cursor:pointer; border-radius:12px; font-size:15px; }
-        .menuItem:hover{ background:#f7f4ff; }
-        .menuItem .miIcon{ width:24px; text-align:center; font-size:18px; }
-        .menuDivider{ border:none; border-top:1px solid #eee; margin:8px 6px; }
-        .menuItem.danger{ color:#7b2bd5; font-weight:700; }
+
         .searchWrap{ position:absolute; left:12px; right:12px; top:10px; z-index:10; display:flex; flex-direction:column; gap:8px; }
         .searchBar{ display:flex; align-items:center; gap:8px; background:#fff; border-radius:12px; padding:10px 12px; border:1px solid #e5e6ea; box-shadow:0 6px 18px rgba(0,0,0,.12); }
         .searchBar input{ flex:1; border:none; outline:none; font-size:15px; }
@@ -607,6 +625,45 @@ export default function MainMap() {
         .rTitle{ font-weight:700; }
         .rAddr{ color:#666; font-size:12px; margin-top:2px; }
         .hint{ padding:10px 12px; color:#666; font-size:13px; }
+
+        /* ===== 비교 모달 ===== */
+        .cmpOverlay{
+          position:absolute; inset:0;
+          z-index:99999;
+          pointer-events:auto;
+        }
+
+        /* 카드: 화면의 절반 조금 넘게, 내부 스크롤 */
+        .cmpCard{
+          position:absolute;
+          left:12px; right:12px; bottom:12px;
+          width:auto;
+          background:#fff;
+          border-radius:16px;
+          box-shadow:0 18px 50px rgba(0,0,0,.18);
+          padding:16px 14px calc(env(safe-area-inset-bottom,0) + 14px);
+
+          max-height:60vh;              /* ← 50vh → 60vh 로 살짝 여유 */
+          min-height:30vh;
+          overflow:auto;
+          -webkit-overflow-scrolling:touch;  /* iOS 부드러운 스크롤 */
+        }
+
+        /* 여백을 조금 줄여서 더 많은 내용 보이게 */
+        .cmpHandle{ width:48px; height:5px; border-radius:6px; margin:2px auto 8px; background:#e5e7eb; }
+        .cmpTitle{ text-align:center; font-weight:800; color:#374151; }
+        .cmpDiv{ border:none; border-top:1px solid #eceef2; margin:8px 0; }  /* ← 12px → 8px */
+        .cmpRow{ display:flex; align-items:center; justify-content:space-between; font-size:15px; color:#4b5563; padding:6px 0; }
+        .cmpRow b{ color:#111827; font-size:16px; }
+        .cmpGuide{ text-align:center; color:#6b7280; line-height:1.45; margin:6px 0 4px; }  /* ← 여백 축소 */
+        .cmpGuide b{ color:#111827; }
+        .cmpOK{
+          width:100%; height:44px; border:none; border-radius:12px;
+          background:linear-gradient(135deg,#6a5af9,#8f7bff); color:#fff; font-weight:700;
+          margin-top:8px; cursor:pointer;
+        }
+
+
       `}</style>
     </div>
   );
