@@ -2,8 +2,6 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-
-
 /* =========================
    상수 & JWT/URL 유틸
    ========================= */
@@ -27,7 +25,6 @@ const getJwt = () => {
     return localStorage.getItem("accessToken") || "";
   }
 };
-
 
 /* =========================
    브라우저 마이크 → 16kHz WAV
@@ -626,44 +623,36 @@ export default function MainMap() {
         .rAddr{ color:#666; font-size:12px; margin-top:2px; }
         .hint{ padding:10px 12px; color:#666; font-size:13px; }
 
-        /* ===== 비교 모달 ===== */
+        /* ==== 비교 모달: 컨테이너 내부에만 표시 (화면 밖으로 안 나가게) ==== */
         .cmpOverlay{
-          position:absolute; inset:0;
-          z-index:99999;
-          pointer-events:auto;
+          position:absolute; inset:0;   /* 컨테이너 내부 덮개 */
+          display:flex; align-items:flex-end; justify-content:center;
+          background:rgba(0,0,0,.18);   /* 흐림 제거: dim만 남김 */
+          z-index:10000; padding:12px;
         }
-
-        /* 카드: 화면의 절반 조금 넘게, 내부 스크롤 */
         .cmpCard{
-          position:absolute;
-          left:12px; right:12px; bottom:12px;
-          width:auto;
+          width:100%;
           background:#fff;
-          border-radius:16px;
+          border-radius:16px 16px 12px 12px;
           box-shadow:0 18px 50px rgba(0,0,0,.18);
           padding:16px 14px calc(env(safe-area-inset-bottom,0) + 14px);
-
-          max-height:60vh;              /* ← 50vh → 60vh 로 살짝 여유 */
-          min-height:30vh;
-          overflow:auto;
-          -webkit-overflow-scrolling:touch;  /* iOS 부드러운 스크롤 */
+          max-height:75vh; overflow:auto;
         }
-
-        /* 여백을 조금 줄여서 더 많은 내용 보이게 */
-        .cmpHandle{ width:48px; height:5px; border-radius:6px; margin:2px auto 8px; background:#e5e7eb; }
+        .cmpHandle{
+          width:48px; height:5px; border-radius:6px; margin:4px auto 10px;
+          background:#e5e7eb;
+        }
         .cmpTitle{ text-align:center; font-weight:800; color:#374151; }
-        .cmpDiv{ border:none; border-top:1px solid #eceef2; margin:8px 0; }  /* ← 12px → 8px */
-        .cmpRow{ display:flex; align-items:center; justify-content:space-between; font-size:15px; color:#4b5563; padding:6px 0; }
+        .cmpDiv{ border:none; border-top:1px solid #eceef2; margin:12px 0; }
+        .cmpRow{ display:flex; align-items:center; justify-content:space-between; font-size:15px; color:#4b5563; }
         .cmpRow b{ color:#111827; font-size:16px; }
-        .cmpGuide{ text-align:center; color:#6b7280; line-height:1.45; margin:6px 0 4px; }  /* ← 여백 축소 */
+        .cmpGuide{ text-align:center; color:#6b7280; line-height:1.6; margin:6px 0 8px; }
         .cmpGuide b{ color:#111827; }
         .cmpOK{
           width:100%; height:44px; border:none; border-radius:12px;
           background:linear-gradient(135deg,#6a5af9,#8f7bff); color:#fff; font-weight:700;
           margin-top:8px; cursor:pointer;
         }
-
-
       `}</style>
     </div>
   );
