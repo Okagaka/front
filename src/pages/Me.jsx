@@ -1,13 +1,9 @@
 // src/pages/Me.jsx
 import React, { useEffect, useMemo, useState } from "react";
 
-/** ===== 서버 기본 주소 & 후보 엔드포인트 ===== */
+/** ===== 서버 기본 주소 & 엔드포인트 (Carpool.jsx 와 동일 스타일) ===== */
 const BASE = "http://13.209.57.96:8080";
-const ME_ENDPOINTS = [
-  `${BASE}/api/me`,
-  `${BASE}/api/profile`,
-  `${BASE}/api/users/me`,
-];
+const ME_ENDPOINT = `${BASE}/api/me`;
 
 function getToken() {
   try {
@@ -81,40 +77,50 @@ export default function Me() {
     const fetchProfile = async () => {
       setLoading(true);
       setErr("");
-      const token = getToken();
+      try {
+        const token = getToken();
+        const res = await fetch(ME_ENDPOINT, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          credentials: "include", // ← Carpool 방식과 동일
+        });
 
-      for (const url of ME_ENDPOINTS) {
-        try {
-          const res = await fetch(url, {
-            headers: {
-              Accept: "application/json",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-          });
-          if (!res.ok) continue;
-          const data = await res.json();
-          const p = data?.data ?? data;
+        const payload = await res.json().catch(() => null);
 
-          const name        = pick(p?.name, p?.username, p?.displayName, authFallback.name);
-          const phone       = pick(p?.phone, p?.phoneNumber, p?.mobile, authFallback.phone);
-          const faces       = collectFacePhotos(p);
-          const region      = extractRegion(p?.region ?? p?.area ?? p);
-          const familyName  = pick(p?.familyName, p?.family?.name, p?.group?.name, p?.householdName);
-          const homeAddress = extractHome(p?.home ?? p);
-          const carModel    = pick(p?.carModel, p?.vehicleModel, p?.car?.model, p?.vehicle?.modelName);
+        // Carpool.jsx와 같은 규칙: HTTP ok + payload.status === 200 여야 성공
+        if (!res.ok) {
+          const msg = payload?.message || `HTTP ${res.status}`;
+          throw new Error(msg);
+        }
+        if (payload?.status !== 200) {
+          throw new Error(payload?.message || "프로필 조회 실패");
+        }
 
-          setProfile({
-            name, phone, faces,
-            areaName: region.areaName, cityDo: region.cityDo, guGun: region.guGun, dong: region.dong, bunji: region.bunji,
-            familyName, homeAddress, carModel,
-          });
-          setLoading(false);
-          return;
-        } catch { /* 다음 후보로 */ }
+        // data로부터 화면 필드 매핑
+        const p = payload?.data ?? {};
+        const name        = pick(p?.name, p?.username, p?.displayName, authFallback.name);
+        const phone       = pick(p?.phone, p?.phoneNumber, p?.mobile, authFallback.phone);
+        const faces       = collectFacePhotos(p);
+        const regionSrc   = p?.region ?? p?.area ?? p;
+        const region      = extractRegion(regionSrc);
+        const familyName  = pick(p?.familyName, p?.family?.name, p?.group?.name, p?.householdName);
+        const homeAddress = extractHome(p?.home ?? p);
+        const carModel    = pick(p?.carModel, p?.vehicleModel, p?.car?.model, p?.vehicle?.modelName);
+
+        setProfile({
+          name, phone, faces,
+          areaName: region.areaName, cityDo: region.cityDo, guGun: region.guGun, dong: region.dong, bunji: region.bunji,
+          familyName, homeAddress, carModel,
+        });
+      } catch (e) {
+        console.warn("[Me] 프로필 조회 실패:", e);
+        setErr(e.message || "서버에서 프로필 정보를 불러오지 못했습니다.");
+      } finally {
+        setLoading(false);
       }
-
-      setErr("서버에서 프로필 정보를 불러오지 못했습니다. (로그인 토큰/권한 확인 필요)");
-      setLoading(false);
     };
 
     fetchProfile();
@@ -194,20 +200,18 @@ export default function Me() {
           padding: 8px 0 max(16px, env(safe-area-inset-bottom));
         }
 
-        /* ===== 축소(스케일) 컨테이너 =====
-           화면 높이가 작아질수록 단계적으로 스케일을 낮춘다.
-           80% 줌(=실질 높이 감소)에서도 전체가 더 잘 보임. */
+        /* ===== 축소(스케일) 컨테이너 ===== */
         .meScale{
           --scale: 1;
           transform: scale(var(--scale));
           transform-origin: top center;
-          width: calc(100% / var(--scale));  /* 스케일에 따른 가로 보정 */
+          width: calc(100% / var(--scale));
           margin: 0 auto;
         }
         @media (max-height: 900px){ .meScale{ --scale: .95; } }
         @media (max-height: 820px){ .meScale{ --scale: .9; } }
         @media (max-height: 740px){ .meScale{ --scale: .85; } }
-        @media (max-height: 680px){ .meScale{ --scale: .8; } }  /* ← 80% 구간 */
+        @media (max-height: 680px){ .meScale{ --scale: .8; } }
 
         .meWrap{ padding:16px; max-width:720px; margin:0 auto; }
         .title{ font-weight:800; font-size:22px; text-align:center; margin:8px 0 14px; }
@@ -271,7 +275,7 @@ function FaceBox({ url }) {
     return (
       <div className="faceBox"><div className="facePh">+</div></div>
     );
-  }
+    }
   return (
     <div className="faceBox"><img src={url} alt="사용자 얼굴" /></div>
   );

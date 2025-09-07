@@ -1,11 +1,9 @@
 // src/pages/History.jsx
 import React, { useEffect, useMemo, useState } from "react";
 
-/** 백엔드 주소/엔드포인트 */
+/** 백엔드 주소/엔드포인트 (Carpool.jsx와 동일 스타일) */
 const BASE = "http://13.209.57.96:8080";
 const RESERVE_ENDPOINT = `${BASE}/api/reservations`;
-// (선택) 실제 주행/탑승 이력을 분리해서 제공한다면 여기에 추가:
-// 존재하지 않아도 try/catch로 무시되니 안전합니다.
 const CANDIDATE_RIDE_ENDPOINTS = [
   `${BASE}/api/rides`,
   `${BASE}/api/trips`,
@@ -30,16 +28,14 @@ function getToken() {
 function normTime(t) {
   if (!t) return "";
   const s = String(t);
-  // "HH:MM:SS" -> "HH:MM"
   const m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
   if (m) return `${m[1].padStart(2, "0")}:${m[2]}`;
   return s;
 }
 function dtKey(date, time) {
-  // 정렬 키 (내림차순)
   const d = date ? String(date).replaceAll("-", "") : "";
   const tm = time ? normTime(time).replace(":", "") : "0000";
-  return `${d}${tm}`; // 예: 202501160930
+  return `${d}${tm}`;
 }
 
 /** 서버 응답을 공통 포맷으로 맵핑 */
@@ -47,12 +43,10 @@ function mapReservation(r, idx) {
   const title = r.title || r.name || "차량 예약";
   const date = r.date || r.reservationDate || "";
   const time = normTime(r.arrivalTime || r.time || "");
-  const from = [
-    r.departureCityDo, r.departureGuGun, r.departureDong, r.departureBunji,
-  ].filter(Boolean).join(" ");
-  const to = [
-    r.destinationCityDo, r.destinationGuGun, r.destinationDong, r.destinationBunji,
-  ].filter(Boolean).join(" ");
+  const from = [r.departureCityDo, r.departureGuGun, r.departureDong, r.departureBunji]
+    .filter(Boolean).join(" ");
+  const to = [r.destinationCityDo, r.destinationGuGun, r.destinationDong, r.destinationBunji]
+    .filter(Boolean).join(" ");
   return {
     id: r.id ?? `res-${date}-${time}-${idx}`,
     type: "예약",
@@ -61,17 +55,11 @@ function mapReservation(r, idx) {
   };
 }
 function mapRide(r, idx) {
-  // 백엔드 필드명이 다를 수 있어 넉넉하게 가드함
   const title = r.title || r.rideTitle || r.tripTitle || "탑승 내역";
   const date = r.date || r.rideDate || r.tripDate || r.startedAt?.slice(0, 10) || "";
   const time = normTime(r.time || r.rideTime || r.tripTime || r.startedAt?.slice(11, 16) || "");
-  const from = r.from || [
-    r.startCityDo, r.startGuGun, r.startDong, r.startBunji,
-  ].filter(Boolean).join(" ");
-  const to = r.to || [
-    r.endCityDo, r.endGuGun, r.endDong, r.endBunji,
-  ].filter(Boolean).join(" ");
-
+  const from = r.from || [r.startCityDo, r.startGuGun, r.startDong, r.startBunji].filter(Boolean).join(" ");
+  const to   = r.to   || [r.endCityDo,   r.endGuGun,   r.endDong,   r.endBunji  ].filter(Boolean).join(" ");
   return {
     id: r.id ?? `ride-${date}-${time}-${idx}`,
     type: "탑승",
@@ -84,8 +72,8 @@ export default function History() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  const [reservations, setReservations] = useState([]); // 서버에서 온 예약
-  const [rides, setRides] = useState([]);               // 서버에서 온 탑승(있다면)
+  const [reservations, setReservations] = useState([]);
+  const [rides, setRides] = useState([]);
 
   // Reserve.jsx에서 성공 시 쌓아둔 로컬 백업 활용
   const localReservations = useMemo(() => {
@@ -100,47 +88,65 @@ export default function History() {
       setLoading(true); setErr("");
       const token = getToken();
 
-      // 1) 예약 목록
+      /** 1) 예약 목록 (Carpool 규격: HTTP OK + payload.status === 200) */
       try {
         const res = await fetch(RESERVE_ENDPOINT, {
+          method: "GET",
           headers: {
             Accept: "application/json",
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
+          credentials: "include",
         });
+
+        const payload = await res.json().catch(() => null);
+
         if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(text || `HTTP ${res.status}`);
+          const msg = payload?.message || `HTTP ${res.status}`;
+          throw new Error(msg);
         }
-        const data = await res.json();
-        const list = Array.isArray(data) ? data : (data?.content ?? []);
+        if (payload?.status !== 200) {
+          throw new Error(payload?.message || "예약 목록 조회 실패");
+        }
+
+        // data는 배열 또는 페이지네이션 객체(data.content)일 수 있음
+        const raw = payload?.data;
+        const list = Array.isArray(raw) ? raw : (raw?.content ?? []);
         setReservations(list.map(mapReservation));
       } catch (e) {
-        // 서버 실패해도 로컬 백업만으로라도 표시
         setReservations([]);
         setErr((prev) => prev || e.message || "예약 목록을 불러오지 못했습니다.");
       }
 
-      // 2) 탑승/주행 후보 엔드포인트들 중 성공하는 것만 수집 (없으면 0건)
+      /** 2) 탑승/주행 이력 (후보 엔드포인트들을 순회, 성공분만 축적) */
       const rideAgg = [];
       for (const url of CANDIDATE_RIDE_ENDPOINTS) {
         try {
           const res = await fetch(url, {
+            method: "GET",
             headers: {
               Accept: "application/json",
               ...(token ? { Authorization: `Bearer ${token}` } : {}),
             },
+            credentials: "include",
           });
-          if (!res.ok) continue; // 존재 안 하거나 권한 없이 4xx면 무시
-          const data = await res.json();
-          const arr = Array.isArray(data) ? data : (data?.content ?? []);
+
+          // 존재하지 않거나 권한 없으면 무시
+          const payload = await res.json().catch(() => null);
+          if (!res.ok || payload?.status !== 200) continue;
+
+          const raw = payload?.data;
+          const arr = Array.isArray(raw) ? raw : (raw?.content ?? []);
           rideAgg.push(...arr);
-        } catch { /* 무시 */ }
+        } catch {
+          // 무시 (다음 후보로)
+        }
       }
       setRides(rideAgg.map(mapRide));
 
       setLoading(false);
     };
+
     go();
   }, []);
 
@@ -151,11 +157,7 @@ export default function History() {
   const all = [...combinedReservations, ...rides];
 
   // 정렬(최신 먼저)
-  all.sort((a, b) => {
-    const ka = dtKey(a.date, a.time);
-    const kb = dtKey(b.date, b.time);
-    return kb.localeCompare(ka);
-  });
+  all.sort((a, b) => dtKey(b.date, b.time).localeCompare(dtKey(a.date, a.time)));
 
   const [tab, setTab] = useState("ALL");
   const filtered =

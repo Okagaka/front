@@ -1,6 +1,7 @@
 // src/pages/MainMap.jsx
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import LocationSharing from "../components/LocationSharing";
 
 export const CAR_POS = Object.freeze({ lat: 37.5666805, lon: 126.9784147 });
 const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(/\/$/, "");
@@ -57,6 +58,12 @@ export default function MainMap() {
   const [recorder, setRecorder] = useState(null);
   const [recState, setRecState] = useState("idle");
   const uploadAbortRef = useRef(null);
+
+  // 📡 서버가 브로드캐스트한 위치를 수신했을 때 (원하면 지도 마커 갱신 로직 추가)
+  const handleIncomingLocation = useCallback((msg) => {
+    console.log("📡 그룹 위치 수신:", msg);
+  }, []);
+
 
   // 하단 시간 카드 상태 + 복원용 버퍼
   const [compare, setCompare] = useState(null);
@@ -396,6 +403,7 @@ export default function MainMap() {
 
   return (
     <div className="mainShell" onClick={() => setOpen(false)}>
+      <LocationSharing onIncoming={handleIncomingLocation} />
       <div className="searchWrap" onClick={(e) => e.stopPropagation()}>
         <div className="searchBar">
           <span className="pin">📍</span>
