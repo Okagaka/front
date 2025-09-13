@@ -10,6 +10,7 @@ import AppShell from "./layouts/AppShell"; // ✅ 공통 레이아웃
 import Carpool from "./pages/Carpool";
 import History from "./pages/History";
 import Me from "./pages/Me";
+import VehicleRegister from "./pages/VehicleRegister";
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
             <Route path="/carpool" element={<Carpool />} />
             <Route path="/history" element={<History />} />
             <Route path="/me" element={<Me />} />
+            <Route path="/vehicle/register" element={<VehicleRegister />} />
             {/* 필요하면 추가: /carpool, /history, /me 등 */}
           </Route>
 

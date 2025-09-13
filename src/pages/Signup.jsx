@@ -229,7 +229,6 @@ export default function Signup() {
   const [familyName, setFamilyName] = useState("");
   const [familySearchResult, setFamilySearchResult] = useState(null);
   const [createMode, setCreateMode] = useState(false);
-  const [vehicleModel, setVehicleModel] = useState("");
   const [createAddr, setCreateAddr] = useState({ cityDo: "", guGun: "", dong: "", bunji: "" });
 
   const [finalUser, setFinalUser] = useState(null);
@@ -345,13 +344,11 @@ export default function Signup() {
           }
         } else {
           if (!familyName.trim()) throw new Error("가족 이름을 입력해 주세요.");
-          if (!vehicleModel.trim()) throw new Error("차 모델명을 입력해 주세요.");
           const { cityDo, guGun, dong, bunji } = createAddr;
           if (!cityDo.trim() || !guGun.trim() || !dong.trim() || !bunji.trim())
             throw new Error("가족 주소(시/도, 구/군, 동, 번지)를 모두 입력해 주세요.");
           await API.familyCreate(tempId, {
             familyName: familyName.trim(),
-            vehicleModel: vehicleModel.trim(),
             cityDo, guGun, dong, bunji
           });
           const user = await API.complete(tempId);
@@ -372,7 +369,6 @@ export default function Signup() {
           groupId: finalUser?.familyId ?? finalUser?.groupId ?? null,
         };
         try { sessionStorage.setItem("auth", JSON.stringify(auth)); } catch {}
-        // 홈으로
         nav("/home", { replace: true, state: auth });
       }
     } catch (e) { setError(e.message || String(e)); }
@@ -451,7 +447,7 @@ export default function Signup() {
             <label className="label">구/군</label>
             <input className="input" value={guGun} onChange={(e) => setGuGun(e.target.value)} placeholder="예: 성동구" />
             <label className="label">동</label>
-            <input className="input" value={dong} onChange={(e) => setDong(e.target.value)} placeholder="예: 하왕십리 dóng" />
+            <input className="input" value={dong} onChange={(e) => setDong(e.target.value)} placeholder="예: 하왕십리동" />
             <label className="label">번지</label>
             <input className="input" value={bunji} onChange={(e) => setBunji(e.target.value)} placeholder="예: 73 또는 73-1" />
           </>)}
@@ -475,8 +471,6 @@ export default function Signup() {
                 <div className="sectionTitle">가족 그룹 생성</div>
                 <label className="label">가족 이름</label>
                 <input className="input" value={familyName} onChange={(e) => setFamilyName(e.target.value)} placeholder="예: 김씨네" />
-                <label className="label">차 모델명</label>
-                <input className="input" value={vehicleModel} onChange={(e) => setVehicleModel(e.target.value)} placeholder="예: 카니발" />
 
                 <div className="subTitle" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                   <span>가족 주소</span>

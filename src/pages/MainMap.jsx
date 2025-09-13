@@ -119,7 +119,6 @@ async function fetchGroupMembers(gid, token) {
       if (!r.ok) continue;
       let raw; try { raw = JSON.parse(t); } catch { raw = {}; }
 
-      // 다양한 포맷 방어적으로 파싱
       const arr =
         raw?.data?.members ??
         raw?.members ??
@@ -203,22 +202,49 @@ export default function MainMap() {
   const otherMarkersRef = useRef(new Map());
   const myIdsRef = useRef({ userId: null, groupId: null, myName: null });
 
-  // 이름 캐시 (userId -> name)
+  // ====== 이름 캐시 (userId -> name) ======
   const nameCacheRef = useRef(new Map());
+
+  // uid → 표시명 (기본은 '가족'; id 노출 제거)
   const getDisplayName = useCallback((uid) => {
     if (uid == null) return "가족";
-    const n = nameCacheRef.current.get(String(uid));
-    return n || `가족 #${uid}`;
+    const key = String(uid);
+
+    // 1) 메모리 캐시
+    const cached = nameCacheRef.current.get(key);
+    if (cached) return cached;
+
+    // 2) 세션 캐시
+    try {
+      const dict = JSON.parse(sessionStorage.getItem("familyNames") || "{}");
+      if (dict && dict[key]) {
+        nameCacheRef.current.set(key, dict[key]);
+        return dict[key];
+      }
+    } catch {}
+
+    // 3) 최종 기본값
+    return "가족";
   }, []);
+
+  // 캐시 저장 + 이미 떠있는 마커 title 업데이트
   const setCachedName = useCallback((uid, name) => {
     if (uid == null || !name) return;
     const key = String(uid);
-    nameCacheRef.current.set(key, String(name));
+    const nm = String(name);
+
+    nameCacheRef.current.set(key, nm);
+    try {
+      const dict = JSON.parse(sessionStorage.getItem("familyNames") || "{}");
+      dict[key] = nm;
+      sessionStorage.setItem("familyNames", JSON.stringify(dict));
+    } catch {}
+
     const meta = otherMarkersRef.current.get(key);
     if (meta?.marker) {
       try {
-        if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(String(name));
-        else meta.marker.options && (meta.marker.options.title = String(name));
+        if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(nm);
+        else if (meta.marker.options) meta.marker.options.title = nm;
       } catch {}
     }
   }, []);
@@ -370,12 +396,11 @@ export default function MainMap() {
               const here = new window.Tmapv2.LatLng(coords.latitude, coords.longitude);
               map.setCenter(here);
               try {
-                const myTitle = myIdsRef.current.myName || "내 위치";
                 hereMarkerRef.current = new window.Tmapv2.Marker({
                   position: here,
                   map,
                   icon: ICONS.me,
-                  title: myTitle,
+                  title: "현재 위치", // ✅ 빨간 핀은 항상 '현재 위치'
                 });
                 hereBaseRef.current = { lat: coords.latitude, lon: coords.longitude };
                 setHerePos({ lat: coords.latitude, lon: coords.longitude });
@@ -435,6 +460,7 @@ export default function MainMap() {
                 const fromId = data?.userId ?? data?.user?.id ?? null;
                 const lat = Number(data?.latitude);
                 const lon = Number(data?.longitude);
+
                 // 이름 같이 오면 캐시
                 const nm = data?.name ?? data?.userName ?? data?.nickname ?? data?.user?.name ?? null;
                 if (fromId != null && nm) setCachedName(fromId, nm);
@@ -454,7 +480,7 @@ export default function MainMap() {
               const nameMap = await fetchGroupMembers(groupId, token);
               for (const [uid, name] of Object.entries(nameMap)) setCachedName(uid, name);
             } catch (e) {
-              // 없으면 무시 (웹소켓 메시지에 이름이 오면 반영됨)
+              // 없으면 무시
             }
 
             // (C) 내 위치 watch & 전송
@@ -589,7 +615,7 @@ export default function MainMap() {
         position: new window.Tmapv2.LatLng(base.lat, base.lon),
         map: mapRef.current,
         icon,
-        title: titleNow,
+        title: titleNow, // ✅ 이름(없으면 '가족')
       });
       meta = makeMarkerMeta(marker, base, userId);
       otherMarkersRef.current.set(idKey, meta);

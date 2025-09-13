@@ -97,9 +97,17 @@ export default function AppShell() {
           <button className="menuItem" onClick={() => { closeDrawer(); nav("/history"); }}>
             <span className="miIcon">🧾</span><span>이용 내역</span>
           </button>
+
+          {/* 내 정보 */}
           <button className="menuItem" onClick={() => { closeDrawer(); nav("/me"); }}>
             <span className="miIcon">👤</span><span>내 정보</span>
           </button>
+
+          {/* 🔹 추가: 차량 등록 */}
+          <button className="menuItem" onClick={() => { closeDrawer(); nav("/vehicle/register"); }}>
+            <span className="miIcon">🚘</span><span>차량 등록</span>
+          </button>
+
           <hr className="menuDivider" />
           <button
             className="menuItem danger"
