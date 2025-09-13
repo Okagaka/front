@@ -191,7 +191,7 @@ export default function Reserve() {
     const payload = {
       title: (title || "").trim() || "개인 출근",
       date,
-      arrivalTime: `${time}:00`,
+      desiredArrivalTime: `${time}:00`,
       departureCityDo: from.cityDo || "",
       departureGuGun: from.guGun || "",
       departureDong: from.dong || "",

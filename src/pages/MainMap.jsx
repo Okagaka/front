@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import LocationSharing from "../components/LocationSharing";
 
+
 export const CAR_POS = Object.freeze({ lat: 37.5666805, lon: 126.9784147 });
 const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(/\/$/, "");
 const STT_URL = API_BASE ? `${API_BASE}/api/stt` : "/api/stt";
@@ -32,6 +33,31 @@ class WavRecorder {
 function downsampleBuffer(buffer,srcRate,dstRate){ if(dstRate===srcRate) return buffer; const r=srcRate/dstRate; const len=Math.round(buffer.length/r); const out=new Float32Array(len); let o=0,i=0; while(o<len){ const next=Math.round((o+1)*r); let sum=0,cnt=0; for(; i<next && i<buffer.length; i++){ sum+=buffer[i]; cnt++; } out[o++]=sum/(cnt||1); } return out; }
 function encodeWAV(samples,sampleRate){ const bps=2,ba=bps*1; const buf=new ArrayBuffer(44+samples.length*bps); const v=new DataView(buf); const ws=(s,o)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}; ws("RIFF",0); v.setUint32(4,36+samples.length*bps,true); ws("WAVE",8); ws("fmt ",12); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,sampleRate,true); v.setUint32(28,sampleRate*ba,true); v.setUint16(32,ba,true); v.setUint16(34,16,true); ws("data",36); v.setUint32(40,samples.length*bps,true); let off=44; for(let i=0;i<samples.length;i++,off+=2){ let s=Math.max(-1,Math.min(1,samples[i])); v.setInt16(off,s<0?s*0x8000:s*0x7fff,true);} return buf; }
 
+/* ====== Tmap SDK 준비 보장 유틸 ======
+   document.write로 내부 스크립트를 추가하기 때문에,
+   <script id="tmap-js-sdk">의 load 직후엔 아직 Tmapv2가 완전히 준비되지 않을 수 있음.
+   아래 폴링으로 Tmapv2.LatLng / Tmapv2.Map이 실제 생성자일 때까지 대기. */
+function waitForTmapV2({ timeoutMs = 12000, intervalMs = 50 } = {}) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const tick = () => {
+      const T = window.Tmapv2;
+      const ok =
+        T &&
+        typeof T.Map === "function" &&
+        typeof T.LatLng === "function" &&
+        // 어떤 환경에서는 함수 객체지만 constructor 프로퍼티가 없는 경우가 있었음 → instanceof Function으로 넉넉히 체크
+        T.Map.prototype &&
+        T.LatLng.prototype;
+      if (ok) return resolve(T);
+      if (Date.now() - start > timeoutMs)
+        return reject(new Error("Tmap SDK not ready"));
+      setTimeout(tick, intervalMs);
+    };
+    tick();
+  });
+}
+
 export default function MainMap() {
   const mapDivRef = useRef(null);
   const mapRef = useRef(null);
@@ -59,11 +85,10 @@ export default function MainMap() {
   const [recState, setRecState] = useState("idle");
   const uploadAbortRef = useRef(null);
 
-  // 📡 서버가 브로드캐스트한 위치를 수신했을 때 (원하면 지도 마커 갱신 로직 추가)
+  // 📡 수신 로그 (가족 마커는 LocationSharing이 자동 표시)
   const handleIncomingLocation = useCallback((msg) => {
     console.log("📡 그룹 위치 수신:", msg);
   }, []);
-
 
   // 하단 시간 카드 상태 + 복원용 버퍼
   const [compare, setCompare] = useState(null);
@@ -158,53 +183,74 @@ export default function MainMap() {
     nav("/", { replace: true });
   }, [state, nav]);
 
-  // 지도 초기화
+  // 지도 초기화 (SDK 준비 보장 후 실행)
   useEffect(() => {
-    const init = () => {
-      if (didInitRef.current) return;
-      if (!window.Tmapv2) { setStatus("지도 로드 실패: Tmapv2 없음"); return; }
-      const { Tmapv2 } = window;
-      if (mapRef.current?.destroy) { try { mapRef.current.destroy(); } catch {} }
-      const map = new Tmapv2.Map(mapDivRef.current, {
-        center: new Tmapv2.LatLng(37.5666805, 126.9784147), width:"100%", height:"100%", zoom:15
-      });
-      mapRef.current = map; didInitRef.current = true;
+    let cancelled = false;
+
+    (async () => {
+      const tag = document.getElementById("tmap-js-sdk");
+      if (!tag) {
+        setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')");
+        return;
+      }
 
       try {
-        carMarkerRef.current = new Tmapv2.Marker({
-          position: new Tmapv2.LatLng(CAR_POS.lat, CAR_POS.lon),
-          map, icon: `${process.env.PUBLIC_URL}/images/Car.png`, title: "차량",
+        // 스크립트 load 이벤트만 믿지 말고, 실제 생성자 준비까지 대기
+        await waitForTmapV2({ timeoutMs: 15000, intervalMs: 50 });
+        if (cancelled || didInitRef.current) return;
+
+        const { Tmapv2 } = window;
+        if (!Tmapv2 || typeof Tmapv2.Map !== "function" || typeof Tmapv2.LatLng !== "function") {
+          setStatus("지도 로드 실패: Tmap SDK 준비 안 됨");
+          return;
+        }
+
+        if (mapRef.current?.destroy) { try { mapRef.current.destroy(); } catch {} }
+        const map = new window.Tmapv2.Map(mapDivRef.current, {
+          center: new window.Tmapv2.LatLng(37.5666805, 126.9784147),
+          width: "100%",
+          height: "100%",
+          zoom: 15,
         });
-      } catch (e) {}
+        mapRef.current = map;
+        didInitRef.current = true;
 
-      if ("geolocation" in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          ({ coords }) => {
-            const here = new Tmapv2.LatLng(coords.latitude, coords.longitude);
-            map.setCenter(here);
-            try {
-              hereMarkerRef.current = new Tmapv2.Marker({
-                position: here, map, icon: `${process.env.PUBLIC_URL}/images/pin_r.png`, title: "현재 위치",
-              });
-              setHerePos({ lat: coords.latitude, lon: coords.longitude });
-            } catch {}
-            setStatus("");
-          },
-          () => setStatus("현재 위치를 가져오지 못했습니다."),
-          { enableHighAccuracy: true, timeout: 8000 }
-        );
-      } else setStatus("");
-    };
+        try {
+          carMarkerRef.current = new window.Tmapv2.Marker({
+            position: new window.Tmapv2.LatLng(CAR_POS.lat, CAR_POS.lon),
+            map,
+            icon: `${process.env.PUBLIC_URL}/images/Car.png`,
+            title: "차량",
+          });
+        } catch (e) {}
 
-    if (window.Tmapv2) init();
-    else {
-      const tag = document.getElementById("tmap-js-sdk");
-      if (!tag) return setStatus("index.html의 Tmap 스크립트를 확인하세요.");
-      const onLoad = () => init();
-      tag.addEventListener("load", onLoad);
-      setTimeout(() => window.Tmapv2 && init(), 0);
-      return () => tag.removeEventListener("load", onLoad);
-    }
+        if ("geolocation" in navigator) {
+          navigator.geolocation.getCurrentPosition(
+            ({ coords }) => {
+              const here = new window.Tmapv2.LatLng(coords.latitude, coords.longitude);
+              map.setCenter(here);
+              try {
+                hereMarkerRef.current = new window.Tmapv2.Marker({
+                  position: here,
+                  map,
+                  icon: `${process.env.PUBLIC_URL}/images/pin_r.png`,
+                  title: "현재 위치",
+                });
+                setHerePos({ lat: coords.latitude, lon: coords.longitude });
+              } catch {}
+              setStatus("");
+            },
+            () => setStatus("현재 위치를 가져오지 못했습니다."),
+            { enableHighAccuracy: true, timeout: 8000 }
+          );
+        } else setStatus("");
+      } catch (e) {
+        console.error("Tmap SDK 대기 실패:", e);
+        setStatus("지도 로드 실패: SDK 준비 시간 초과");
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, []);
 
   // POI 검색
@@ -272,13 +318,12 @@ export default function MainMap() {
     if (!selectedPlace) return;
     const map = mapRef.current;
     if (!map || !window.Tmapv2) return;
-    const { Tmapv2 } = window;
-    const pos = new Tmapv2.LatLng(selectedPlace.lat, selectedPlace.lon);
+    const pos = new window.Tmapv2.LatLng(selectedPlace.lat, selectedPlace.lon);
     map.setCenter(pos); map.setZoom(16);
 
     try {
       if (destMarkerRef.current) destMarkerRef.current.setMap(null);
-      destMarkerRef.current = new Tmapv2.Marker({
+      destMarkerRef.current = new window.Tmapv2.Marker({
         position: pos, map, icon: `${process.env.PUBLIC_URL}/images/pin_b.png`, title: selectedPlace.name,
       });
     } catch {}
@@ -403,7 +448,9 @@ export default function MainMap() {
 
   return (
     <div className="mainShell" onClick={() => setOpen(false)}>
-      <LocationSharing onIncoming={handleIncomingLocation} />
+      {/* ✅ 가족 위치 자동 마커 표시 (pin_o.png / pin_y.png) */}
+      <LocationSharing mapRef={mapRef} onIncoming={handleIncomingLocation} />
+
       <div className="searchWrap" onClick={(e) => e.stopPropagation()}>
         <div className="searchBar">
           <span className="pin">📍</span>
@@ -414,7 +461,7 @@ export default function MainMap() {
             onClick={() => setCompare(null)}
             placeholder="도착지 검색(장소명)"
           />
-          {query && <button className="clearBtn" onClick={clearQuery} aria-label="지우기">×</button>}
+        {query && <button className="clearBtn" onClick={clearQuery} aria-label="지우기">×</button>}
         </div>
         {open && (results.length > 0 || loading) && (
           <div className="resultBox">
