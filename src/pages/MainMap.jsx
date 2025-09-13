@@ -1,12 +1,28 @@
 // src/pages/MainMap.jsx
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import LocationSharing from "../components/LocationSharing";
 
-
+/* ====== 공통 설정 ====== */
 export const CAR_POS = Object.freeze({ lat: 37.5666805, lon: 126.9784147 });
 const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(/\/$/, "");
 const STT_URL = API_BASE ? `${API_BASE}/api/stt` : "/api/stt";
+
+/* WebSocket URL 결정 (API_BASE 기준, 없으면 현재 호스트) */
+const WS_URL = (() => {
+  const env = process.env.REACT_APP_WS_BASE || API_BASE;
+  try {
+    if (env) {
+      const u = new URL(env.startsWith("http") ? env : `https://${env}`);
+      const proto = u.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${u.host}/ws-location`;
+    }
+  } catch {}
+  const hereProto = window.location.protocol === "https:" ? "wss://" : "ws://";
+  return `${hereProto}${window.location.host}/ws-location`;
+})();
+
+/** 일렬 배치(가로) 간격 설정 (반쯤 겹치게) */
+const LINE_LAYOUT = { desiredPx: 18, clusterPx: 14 };
 
 const setJwt = (t) => { try { if (t) sessionStorage.setItem("jwt", t); } catch {} };
 const getJwt = () => {
@@ -23,7 +39,7 @@ const getJwt = () => {
   }
 };
 
-/* ====== 녹음기 ====== (생략 없이 그대로) */
+/* ====== 녹음기 (원문 그대로) ====== */
 class WavRecorder {
   constructor(stream, ctx, source, proc) { this.stream=stream; this.ctx=ctx; this.source=source; this.proc=proc; this.chunks=[]; }
   static async create(){ const s=await navigator.mediaDevices.getUserMedia({audio:true}); const AC=window.AudioContext||window.webkitAudioContext; const ctx=new AC(); const src=ctx.createMediaStreamSource(s); const p=ctx.createScriptProcessor(4096,1,1); return new WavRecorder(s,ctx,src,p); }
@@ -33,29 +49,118 @@ class WavRecorder {
 function downsampleBuffer(buffer,srcRate,dstRate){ if(dstRate===srcRate) return buffer; const r=srcRate/dstRate; const len=Math.round(buffer.length/r); const out=new Float32Array(len); let o=0,i=0; while(o<len){ const next=Math.round((o+1)*r); let sum=0,cnt=0; for(; i<next && i<buffer.length; i++){ sum+=buffer[i]; cnt++; } out[o++]=sum/(cnt||1); } return out; }
 function encodeWAV(samples,sampleRate){ const bps=2,ba=bps*1; const buf=new ArrayBuffer(44+samples.length*bps); const v=new DataView(buf); const ws=(s,o)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}; ws("RIFF",0); v.setUint32(4,36+samples.length*bps,true); ws("WAVE",8); ws("fmt ",12); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,sampleRate,true); v.setUint32(28,sampleRate*ba,true); v.setUint16(32,ba,true); v.setUint16(34,16,true); ws("data",36); v.setUint32(40,samples.length*bps,true); let off=44; for(let i=0;i<samples.length;i++,off+=2){ let s=Math.max(-1,Math.min(1,samples[i])); v.setInt16(off,s<0?s*0x8000:s*0x7fff,true);} return buf; }
 
-/* ====== Tmap SDK 준비 보장 유틸 ======
-   document.write로 내부 스크립트를 추가하기 때문에,
-   <script id="tmap-js-sdk">의 load 직후엔 아직 Tmapv2가 완전히 준비되지 않을 수 있음.
-   아래 폴링으로 Tmapv2.LatLng / Tmapv2.Map이 실제 생성자일 때까지 대기. */
+/* ====== Tmap SDK 준비 대기 ====== */
 function waitForTmapV2({ timeoutMs = 12000, intervalMs = 50 } = {}) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const tick = () => {
       const T = window.Tmapv2;
-      const ok =
-        T &&
-        typeof T.Map === "function" &&
-        typeof T.LatLng === "function" &&
-        // 어떤 환경에서는 함수 객체지만 constructor 프로퍼티가 없는 경우가 있었음 → instanceof Function으로 넉넉히 체크
-        T.Map.prototype &&
-        T.LatLng.prototype;
+      const ok = T && typeof T.Map==="function" && typeof T.LatLng==="function" && T.Map.prototype && T.LatLng.prototype;
       if (ok) return resolve(T);
-      if (Date.now() - start > timeoutMs)
-        return reject(new Error("Tmap SDK not ready"));
+      if (Date.now()-start > timeoutMs) return reject(new Error("Tmap SDK not ready"));
       setTimeout(tick, intervalMs);
     };
     tick();
   });
+}
+
+/* ====== STOMP 로더 ====== */
+async function ensureStomp() {
+  if (window.Stomp?.over) return window.Stomp;
+  await new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = "https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js";
+    el.async = true;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error("Failed to load STOMP library"));
+    document.head.appendChild(el);
+  });
+  if (!window.Stomp?.over) throw new Error("STOMP not available after load");
+  return window.Stomp;
+}
+
+/* ====== 아이콘 경로 ====== */
+const ICONS = {
+  me: `${process.env.PUBLIC_URL}/images/pin_r.png`,
+  dest: `${process.env.PUBLIC_URL}/images/pin_b.png`,
+  car: `${process.env.PUBLIC_URL}/images/Car.png`,
+  otherYellow: `${process.env.PUBLIC_URL}/images/pin_y.png`,
+  otherOrange: `${process.env.PUBLIC_URL}/images/pin_o.png`,
+};
+
+/* ====== API 유틸 (이름 조회) ====== */
+const apiUrl = (path) => {
+  const base = API_BASE || "";
+  if (!base) return path.startsWith("/") ? path : `/${path}`;
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+};
+
+const MEMBER_ENDPOINT_PATHS = [
+  (gid) => `/api/group/${gid}/members`,
+  (gid) => `/api/family/${gid}/members`,
+  (gid) => `/api/groups/${gid}/members`,
+  (gid) => `/api/family/members?groupId=${encodeURIComponent(gid)}`,
+  (gid) => `/api/members?groupId=${encodeURIComponent(gid)}`,
+];
+
+async function fetchGroupMembers(gid, token) {
+  if (!gid) return {};
+  for (const build of MEMBER_ENDPOINT_PATHS) {
+    const url = apiUrl(build(gid));
+    try {
+      const r = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: "include",
+      });
+      const t = await r.text().catch(() => "");
+      if (!r.ok) continue;
+      let raw; try { raw = JSON.parse(t); } catch { raw = {}; }
+
+      // 다양한 포맷 방어적으로 파싱
+      const arr =
+        raw?.data?.members ??
+        raw?.members ??
+        raw?.data ??
+        raw?.list ??
+        (Array.isArray(raw) ? raw : raw?.content);
+
+      const list = Array.isArray(arr) ? arr : [];
+      const pairs = [];
+      for (const it of list) {
+        const uid = it?.userId ?? it?.id ?? it?.user?.id ?? null;
+        const name = it?.name ?? it?.userName ?? it?.nickname ?? it?.user?.name ?? null;
+        if (uid != null && name) pairs.push([String(uid), String(name)]);
+      }
+      if (pairs.length) return Object.fromEntries(pairs);
+    } catch (e) {
+      // 다음 후보 엔드포인트로
+    }
+  }
+  return {};
+}
+
+/* ====== 거리/투영 유틸 ====== */
+function haversineM(a, b) {
+  const R = 6378137;
+  const toRad = (x) => x * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function metersPerPixelAtLat(lat, zoom) {
+  const R = 6378137;
+  return Math.cos(lat * Math.PI/180) * 2 * Math.PI * R / (256 * Math.pow(2, zoom));
+}
+
+/* ====== 마커 관리 구조 ====== */
+function makeMarkerMeta(marker, base, userId) {
+  return { marker, base: { ...base }, userId };
 }
 
 export default function MainMap() {
@@ -64,6 +169,7 @@ export default function MainMap() {
   const didInitRef = useRef(false);
 
   const hereMarkerRef = useRef(null);
+  const hereBaseRef = useRef({ lat: null, lon: null });
   const destMarkerRef = useRef(null);
   const carMarkerRef = useRef(null);
   const routeLineRef = useRef(null);
@@ -73,6 +179,7 @@ export default function MainMap() {
   const [status, setStatus] = useState("지도 로딩 중…");
 
   const [query, setQuery] = useState("");
+
   const [results, setResults] = useState([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -85,19 +192,49 @@ export default function MainMap() {
   const [recState, setRecState] = useState("idle");
   const uploadAbortRef = useRef(null);
 
-  // 📡 수신 로그 (가족 마커는 LocationSharing이 자동 표시)
+  // ====== 실시간 위치 공유 ======
+  const stompRef = useRef(null);
+  const wsRef = useRef(null);
+  const subRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const watchIdRef = useRef(null);
+
+  // userId -> { marker, base:{lat,lon}, userId }
+  const otherMarkersRef = useRef(new Map());
+  const myIdsRef = useRef({ userId: null, groupId: null, myName: null });
+
+  // 이름 캐시 (userId -> name)
+  const nameCacheRef = useRef(new Map());
+  const getDisplayName = useCallback((uid) => {
+    if (uid == null) return "가족";
+    const n = nameCacheRef.current.get(String(uid));
+    return n || `가족 #${uid}`;
+  }, []);
+  const setCachedName = useCallback((uid, name) => {
+    if (uid == null || !name) return;
+    const key = String(uid);
+    nameCacheRef.current.set(key, String(name));
+    const meta = otherMarkersRef.current.get(key);
+    if (meta?.marker) {
+      try {
+        if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(String(name));
+        else meta.marker.options && (meta.marker.options.title = String(name));
+      } catch {}
+    }
+  }, []);
+
+  // 디버그 로그
   const handleIncomingLocation = useCallback((msg) => {
     console.log("📡 그룹 위치 수신:", msg);
   }, []);
 
-  // 하단 시간 카드 상태 + 복원용 버퍼
+  // 하단 시간 카드 상태 + 복원
   const [compare, setCompare] = useState(null);
   const compareRef = useRef(null);
   const compareBackupRef = useRef(null);
   const drawerHidCompareRef = useRef(false);
   useEffect(() => { compareRef.current = compare; }, [compare]);
 
-  // AppShell에서 쏘는 드로어 열림/닫힘 이벤트 구독
   useEffect(() => {
     const onOpen = () => {
       if (compareRef.current) {
@@ -169,33 +306,33 @@ export default function MainMap() {
     return () => window.removeEventListener("app/mic-toggle", onToggle);
   }, [recState, startRecording, stopAndTranscribe]);
 
-  // 로그인 체크/복구
+  // 로그인 체크/복구 + userId/groupId/name 세팅
   useEffect(() => {
+    let me = null;
     if (state?.name && state?.phone) {
       if (state?.token) setJwt(state.token);
-      try { sessionStorage.setItem("auth", JSON.stringify(state)); } catch {}
-      return;
+      me = state;
+    } else {
+      const saved = sessionStorage.getItem("auth");
+      if (saved) {
+        try { const p = JSON.parse(saved); if (p?.name && p?.phone) me = p; } catch {}
+      }
     }
-    const saved = sessionStorage.getItem("auth");
-    if (saved) {
-      try { const p = JSON.parse(saved); if (p?.name && p?.phone) return; } catch {}
-    }
-    nav("/", { replace: true });
+    if (!me) { nav("/", { replace: true }); return; }
+    myIdsRef.current.userId = me.userId ?? null;
+    myIdsRef.current.groupId = me.groupId ?? null;
+    myIdsRef.current.myName = me.name ?? null;
   }, [state, nav]);
 
-  // 지도 초기화 (SDK 준비 보장 후 실행)
+  /* ===== 지도 초기화 ===== */
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       const tag = document.getElementById("tmap-js-sdk");
-      if (!tag) {
-        setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')");
-        return;
-      }
+      if (!tag) { setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')"); return; }
 
       try {
-        // 스크립트 load 이벤트만 믿지 말고, 실제 생성자 준비까지 대기
         await waitForTmapV2({ timeoutMs: 15000, intervalMs: 50 });
         if (cancelled || didInitRef.current) return;
 
@@ -215,11 +352,14 @@ export default function MainMap() {
         mapRef.current = map;
         didInitRef.current = true;
 
+        // 줌 변경 시 레이아웃 재계산(픽셀 간격 유지)
+        try { map.addListener("zoom_changed", () => recomputeLineLayout()); } catch {}
+
         try {
           carMarkerRef.current = new window.Tmapv2.Marker({
             position: new window.Tmapv2.LatLng(CAR_POS.lat, CAR_POS.lon),
             map,
-            icon: `${process.env.PUBLIC_URL}/images/Car.png`,
+            icon: ICONS.car,
             title: "차량",
           });
         } catch (e) {}
@@ -230,13 +370,16 @@ export default function MainMap() {
               const here = new window.Tmapv2.LatLng(coords.latitude, coords.longitude);
               map.setCenter(here);
               try {
+                const myTitle = myIdsRef.current.myName || "내 위치";
                 hereMarkerRef.current = new window.Tmapv2.Marker({
                   position: here,
                   map,
-                  icon: `${process.env.PUBLIC_URL}/images/pin_r.png`,
-                  title: "현재 위치",
+                  icon: ICONS.me,
+                  title: myTitle,
                 });
+                hereBaseRef.current = { lat: coords.latitude, lon: coords.longitude };
                 setHerePos({ lat: coords.latitude, lon: coords.longitude });
+                recomputeLineLayout();
               } catch {}
               setStatus("");
             },
@@ -252,6 +395,214 @@ export default function MainMap() {
 
     return () => { cancelled = true; };
   }, []);
+
+  /* ===== WebSocket/STOMP 연결 & 위치 송수신 ===== */
+  useEffect(() => {
+    let cancelled = false;
+
+    const connect = async () => {
+      try {
+        const token = getJwt();
+        const { userId, groupId } = myIdsRef.current || {};
+        if (!token || !groupId) { console.warn("토큰 또는 groupId 없음 → STOMP 연결 보류", { token: !!token, groupId }); return; }
+
+        await ensureStomp();
+
+        try { subRef.current?.unsubscribe(); } catch {}
+        try { stompRef.current?.disconnect(() => {}); } catch {}
+        try { wsRef.current?.close?.(); } catch {}
+        clearTimeout(reconnectTimerRef.current);
+
+        const socket = new WebSocket(WS_URL);
+        wsRef.current = socket;
+        const stomp = window.Stomp.over(socket);
+        stomp.debug = null;
+        stompRef.current = stomp;
+
+        const headers = { Authorization: `Bearer ${token}` };
+        stomp.connect(
+          headers,
+          async () => {
+            if (cancelled) return;
+            console.log("✅ STOMP Connected");
+
+            // (A) 구독
+            const sub = stomp.subscribe(`/topic/group/${groupId}`, (message) => {
+              try {
+                const data = JSON.parse(message.body);
+                handleIncomingLocation(data);
+
+                const fromId = data?.userId ?? data?.user?.id ?? null;
+                const lat = Number(data?.latitude);
+                const lon = Number(data?.longitude);
+                // 이름 같이 오면 캐시
+                const nm = data?.name ?? data?.userName ?? data?.nickname ?? data?.user?.name ?? null;
+                if (fromId != null && nm) setCachedName(fromId, nm);
+
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+                if (fromId != null && userId != null && Number(fromId) === Number(userId)) return; // 내 메시지는 무시
+
+                placeOrMoveOtherMarker(fromId, lat, lon);
+              } catch (e) {
+                console.warn("수신 파싱 실패:", e, message?.body);
+              }
+            });
+            subRef.current = sub;
+
+            // (B) 가족 구성원 이름 미리 가져오기 (서버에 엔드포인트가 있을 때만)
+            try {
+              const nameMap = await fetchGroupMembers(groupId, token);
+              for (const [uid, name] of Object.entries(nameMap)) setCachedName(uid, name);
+            } catch (e) {
+              // 없으면 무시 (웹소켓 메시지에 이름이 오면 반영됨)
+            }
+
+            // (C) 내 위치 watch & 전송
+            if ("geolocation" in navigator) {
+              try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
+              watchIdRef.current = navigator.geolocation.watchPosition(
+                (pos) => {
+                  const lat = pos.coords.latitude;
+                  const lon = pos.coords.longitude;
+                  moveMyMarker(lat, lon);
+                  const payload = {
+                    latitude: lat,
+                    longitude: lon,
+                    ...(groupId ? { groupId } : {}),
+                    ...(userId ? { userId } : {}),
+                    ...(myIdsRef.current.myName ? { name: myIdsRef.current.myName } : {}),
+                  };
+                  try { stomp.send("/app/location/update", {}, JSON.stringify(payload)); } catch (e) { console.warn("위치 전송 실패", e); }
+                },
+                (err) => console.warn("watchPosition 실패", err),
+                { enableHighAccuracy: true, maximumAge: 1500, timeout: 12000 }
+              );
+            }
+          },
+          (error) => {
+            console.error("❌ STOMP 연결 실패:", error);
+            if (!cancelled) {
+              clearTimeout(reconnectTimerRef.current);
+              reconnectTimerRef.current = setTimeout(connect, 2500);
+            }
+          }
+        );
+      } catch (e) {
+        console.error("STOMP 초기화 실패:", e);
+        clearTimeout(reconnectTimerRef.current);
+        if (!cancelled) reconnectTimerRef.current = setTimeout(connect, 3000);
+      }
+    };
+
+    // map 준비 + auth 설정 후 연결 시도
+    const readyCheck = setInterval(() => {
+      const hasMap = !!mapRef.current;
+      const { groupId } = myIdsRef.current || {};
+      const hasGroup = !!groupId;
+      if (hasMap && hasGroup) {
+        clearInterval(readyCheck);
+        connect();
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearInterval(readyCheck);
+      try { subRef.current?.unsubscribe(); } catch {}
+      try { stompRef.current?.disconnect(() => {}); } catch {}
+      try { wsRef.current?.close?.(); } catch {}
+      try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
+      clearTimeout(reconnectTimerRef.current);
+      for (const meta of otherMarkersRef.current.values()) {
+        try { meta.marker.setMap(null); } catch {}
+      }
+      otherMarkersRef.current.clear();
+    };
+  }, [handleIncomingLocation, setCachedName, getDisplayName]);
+
+  /* ===== 레이아웃: ‘내 위치’를 중심으로 가로 일렬 + 반쯤 겹치기 ===== */
+  function recomputeLineLayout() {
+    if (!mapRef.current || !window.Tmapv2) return;
+
+    const { lat: meLat, lon: meLon } = hereBaseRef.current || {};
+    if (!Number.isFinite(meLat) || !Number.isFinite(meLon)) return;
+
+    const zoom = mapRef.current.getZoom?.() ?? 15;
+    const mpp = metersPerPixelAtLat(meLat, zoom);
+    const stepM = (LINE_LAYOUT.desiredPx || 18) * mpp;
+    const clusterM = (LINE_LAYOUT.clusterPx || 14) * mpp;
+
+    const near = [];
+    otherMarkersRef.current.forEach((meta, idKey) => {
+      const d = haversineM({ lat: meLat, lon: meLon }, meta.base);
+      if (d <= clusterM) near.push({ idKey, meta });
+    });
+
+    near.sort((a, b) => {
+      const ua = Number(a.meta.userId ?? a.idKey) || 0;
+      const ub = Number(b.meta.userId ?? b.idKey) || 0;
+      return ua - ub;
+    });
+
+    const R = 6378137, rad = Math.PI / 180;
+
+    try { hereMarkerRef.current?.setPosition(new window.Tmapv2.LatLng(meLat, meLon)); } catch {}
+
+    for (let i = 0; i < near.length; i++) {
+      const sign = i % 2 === 0 ? 1 : -1;
+      const k = Math.ceil((i + 1) / 2);
+      const offsetM = stepM * k * sign;
+      const dLon = (offsetM / (R * Math.cos(meLat * rad))) * (180 / Math.PI);
+      const adj = { lat: meLat, lon: meLon + dLon };
+      const { marker } = near[i].meta;
+      try { marker.setPosition(new window.Tmapv2.LatLng(adj.lat, adj.lon)); } catch {}
+    }
+
+    otherMarkersRef.current.forEach((meta) => {
+      const inNear = near.some((x) => x.meta === meta);
+      if (!inNear) {
+        try { meta.marker.setPosition(new window.Tmapv2.LatLng(meta.base.lat, meta.base.lon)); } catch {}
+      }
+    });
+  }
+
+  function moveMyMarker(lat, lon) {
+    try {
+      setHerePos({ lat, lon });
+      hereBaseRef.current = { lat, lon };
+      if (mapRef.current && window.Tmapv2) recomputeLineLayout();
+    } catch {}
+  }
+
+  function placeOrMoveOtherMarker(userId, lat, lon) {
+    if (!mapRef.current || !window.Tmapv2) return;
+    const idKey = userId == null ? "unknown" : String(userId);
+
+    let meta = otherMarkersRef.current.get(idKey);
+    const base = { lat, lon };
+
+    const titleNow = getDisplayName(userId);
+    if (!meta) {
+      const even = userId != null && Number(userId) % 2 === 0;
+      const icon = even ? ICONS.otherYellow : ICONS.otherOrange;
+      const marker = new window.Tmapv2.Marker({
+        position: new window.Tmapv2.LatLng(base.lat, base.lon),
+        map: mapRef.current,
+        icon,
+        title: titleNow,
+      });
+      meta = makeMarkerMeta(marker, base, userId);
+      otherMarkersRef.current.set(idKey, meta);
+    } else {
+      meta.base = base;
+      try {
+        if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(titleNow);
+        else meta.marker.options && (meta.marker.options.title = titleNow);
+      } catch {}
+    }
+
+    recomputeLineLayout();
+  }
 
   // POI 검색
   const debounceRef = useRef(null);
@@ -324,7 +675,7 @@ export default function MainMap() {
     try {
       if (destMarkerRef.current) destMarkerRef.current.setMap(null);
       destMarkerRef.current = new window.Tmapv2.Marker({
-        position: pos, map, icon: `${process.env.PUBLIC_URL}/images/pin_b.png`, title: selectedPlace.name,
+        position: pos, map, icon: ICONS.dest, title: selectedPlace.name,
       });
     } catch {}
 
@@ -448,8 +799,7 @@ export default function MainMap() {
 
   return (
     <div className="mainShell" onClick={() => setOpen(false)}>
-      {/* ✅ 가족 위치 자동 마커 표시 (pin_o.png / pin_y.png) */}
-      <LocationSharing mapRef={mapRef} onIncoming={handleIncomingLocation} />
+      {/* 실시간 마커는 이 컴포넌트 내부에서 처리 */}
 
       <div className="searchWrap" onClick={(e) => e.stopPropagation()}>
         <div className="searchBar">
@@ -461,7 +811,7 @@ export default function MainMap() {
             onClick={() => setCompare(null)}
             placeholder="도착지 검색(장소명)"
           />
-        {query && <button className="clearBtn" onClick={clearQuery} aria-label="지우기">×</button>}
+          {query && <button className="clearBtn" onClick={clearQuery} aria-label="지우기">×</button>}
         </div>
         {open && (results.length > 0 || loading) && (
           <div className="resultBox">

@@ -1,4 +1,3 @@
-// src/pages/Login.jsx
 import React, { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 
@@ -8,6 +7,14 @@ const LOGIN_ENDPOINTS = [
   `${BASE}/api/auth/login`,
   `${BASE}/api/login`,
   `${BASE}/login`,
+];
+
+/* 로그인 후 내 프로필(userId, groupId 등) 조회 시도 */
+const ME_ENDPOINTS = [
+  `${BASE}/api/me`,
+  `${BASE}/api/auth/me`,
+  `${BASE}/me`,
+  `${BASE}/api/users/me`,
 ];
 
 function toDashedPhone(v) {
@@ -34,7 +41,7 @@ async function tryLogin(name, phone) {
             "Content-Type": "application/json",
             "Accept": "application/json",
           },
-          credentials: "include", // 세션 쿠키 사용하는 서버 대비(무해)
+          credentials: "include",
           body: JSON.stringify(body),
         });
 
@@ -43,7 +50,7 @@ async function tryLogin(name, phone) {
         if (!res.ok) {
           console.log("[login] FAIL:", res.status, "at", url, "-", text?.slice(0, 160));
           lastErrText = text || `HTTP ${res.status}`;
-          continue; // 다음 바디/엔드포인트로
+          continue;
         }
 
         console.log("[login] OK:", res.status, "at", url);
@@ -52,11 +59,8 @@ async function tryLogin(name, phone) {
         let raw;
         try { raw = JSON.parse(text); } catch { raw = { rawText: text }; }
 
-        // 흔한 응답 포맷들:
-        // { status:200, message:"", data:{ accessToken, user:{name, phone}} }
-        // { accessToken, user:{...} }
-        // { token, name, phone } ...
         const data = raw?.data ?? raw;
+
         const token =
           data?.accessToken ??
           data?.token ??
@@ -65,17 +69,57 @@ async function tryLogin(name, phone) {
           null;
 
         const user =
-          data?.user ??
-          data?.profile ??
-          { name: data?.name, phone: data?.phone || data?.phoneNumber };
+          data?.user ?? data?.profile ?? {
+            name: data?.name,
+            phone: data?.phone || data?.phoneNumber,
+          };
 
-        return { ok: true, token, user, raw };
+        // 혹시 로그인 응답에 userId/groupId가 이미 들어오는 경우도 흡수
+        const userId =
+          user?.id ?? user?.userId ?? data?.userId ?? data?.id ?? data?.data?.userId ?? null;
+
+        const groupId =
+          user?.groupId ?? user?.familyId ?? data?.groupId ?? data?.familyId ?? null;
+
+        return { ok: true, token, user, userId, groupId, raw };
       } catch (e) {
         lastErrText = e?.message || String(e);
       }
     }
   }
   return { ok: false, error: lastErrText || "로그인 요청 실패" };
+}
+
+/* 토큰으로 프로필 조회: userId/groupId 확보 */
+async function fetchMe(token) {
+  for (const url of ME_ENDPOINTS) {
+    try {
+      const res = await fetch(url, {
+        headers: { "Accept": "application/json", Authorization: `Bearer ${token}` },
+        credentials: "include",
+      });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) continue;
+
+      let raw; try { raw = JSON.parse(text); } catch { raw = {}; }
+      const d = raw?.data ?? raw;
+
+      // 유연한 키 추출
+      const userObj = d?.user ?? d?.profile ?? d;
+      const userId =
+        userObj?.id ?? userObj?.userId ?? d?.userId ?? d?.id ?? null;
+      const groupId =
+        userObj?.groupId ?? userObj?.familyId ?? d?.groupId ?? d?.familyId ?? userObj?.family?.id ?? null;
+
+      const name = userObj?.name ?? d?.name ?? null;
+      const phone = userObj?.phone ?? userObj?.phoneNumber ?? d?.phone ?? d?.phoneNumber ?? null;
+
+      return { ok: true, userId, groupId, name, phone, raw };
+    } catch (e) {
+      // try next
+    }
+  }
+  return { ok: false };
 }
 
 export default function Login() {
@@ -89,37 +133,50 @@ export default function Login() {
     e.preventDefault();
     setError("");
 
-    // 프론트 검증
     if (!name.trim()) return setError("이름을 입력해 주세요.");
     if (!/^01[0-9]-?\d{3,4}-?\d{4}$/.test(phone))
       return setError("전화번호는 010-1234-5678 형식으로 입력해 주세요.");
 
-    setLoading(true); 
+    setLoading(true);
     const dashed = toDashedPhone(phone);
 
-    // 백엔드 로그인 시도
     const result = await tryLogin(name.trim(), dashed);
-    setLoading(false);
 
     if (!result.ok) {
+      setLoading(false);
       return setError(result.error || "로그인에 실패했습니다.");
     }
 
-    // 토큰이 있으면 저장(향후 인증 호출용)
+    // 토큰 저장
     if (result.token) {
       try { localStorage.setItem("accessToken", result.token); } catch {}
       try { sessionStorage.setItem("jwt", result.token); } catch {}
     }
 
-    const me = {
+    // /me 호출로 userId/groupId 보강
+    let resolved = {
       name: result?.user?.name || name.trim(),
       phone: result?.user?.phone || dashed,
       token: result.token || undefined,
+      userId: result.userId ?? null,
+      groupId: result.groupId ?? null,
     };
-    try { sessionStorage.setItem("auth", JSON.stringify(me)); } catch {}
 
+    if ((!resolved.userId || !resolved.groupId) && result.token) {
+      const me = await fetchMe(result.token);
+      if (me.ok) {
+        resolved.userId = resolved.userId ?? me.userId ?? null;
+        resolved.groupId = resolved.groupId ?? me.groupId ?? null;
+        resolved.name = resolved.name ?? me.name ?? undefined;
+        resolved.phone = resolved.phone ?? me.phone ?? undefined;
+      }
+    }
+
+    try { sessionStorage.setItem("auth", JSON.stringify(resolved)); } catch {}
+
+    setLoading(false);
     // 뒤로가기로 로그인 화면 안 돌아오게 replace 사용
-    nav("/home", { replace: true, state: me });
+    nav("/home", { replace: true, state: resolved });
   };
 
   return (
