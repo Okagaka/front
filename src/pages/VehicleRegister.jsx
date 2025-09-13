@@ -65,7 +65,7 @@ export default function VehicleRegister() {
           height:46px;
           border:none;
           border-radius:12px;
-          background:linear-gradient(135deg,#6a5af9,#8f7bff);
+          background:linear-gradient(135deg,#6a5af9);
           color:#fff;
           font-weight:800;
           cursor:pointer;
