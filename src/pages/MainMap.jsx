@@ -5,10 +5,10 @@ import { useLocation, useNavigate } from "react-router-dom";
 /* ====== 공통 설정 ====== */
 const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(/\/$/, "");
 
-/* STT 예: 다른 곳에서 쓰면 유지 */
+/* (보존) STT */
 const STT_URL = API_BASE ? `${API_BASE}/api/stt` : "/api/stt";
 
-/* WebSocket URL 결정 (API_BASE 기준, 없으면 현재 호스트) */
+/* WebSocket URL (환경변수 우선) */
 const WS_URL = (() => {
   const env = process.env.REACT_APP_WS_BASE || API_BASE;
   try {
@@ -22,7 +22,7 @@ const WS_URL = (() => {
   return `${hereProto}${window.location.host}/ws-location`;
 })();
 
-/** 일렬 배치(가로) 간격 설정 (반쯤 겹치게) */
+/** 일렬 배치(가로) 간격 설정 (반겹) */
 const LINE_LAYOUT = { desiredPx: 18, clusterPx: 14 };
 
 /** JWT */
@@ -47,9 +47,9 @@ function waitForTmapV2({ timeoutMs = 15000, intervalMs = 50 } = {}) {
     const start = Date.now();
     const tick = () => {
       const T = window.Tmapv2;
-      const ok = T && typeof T.Map==="function" && typeof T.LatLng==="function";
+      const ok = T && typeof T.Map === "function" && typeof T.LatLng === "function";
       if (ok) return resolve(T);
-      if (Date.now()-start > timeoutMs) return reject(new Error("Tmap SDK not ready"));
+      if (Date.now() - start > timeoutMs) return reject(new Error("Tmap SDK not ready"));
       setTimeout(tick, intervalMs);
     };
     tick();
@@ -71,49 +71,76 @@ async function ensureStomp() {
   return window.Stomp;
 }
 
-/* ====== 아이콘 경로 ====== */
+/* ====== 아이콘 ====== */
 const ICONS = {
-  me: `${process.env.PUBLIC_URL}/images/pin_r.png`,     // 내 위치 (빨강)
-  dest: `${process.env.PUBLIC_URL}/images/pin_b.png`,   // 목적지 (파랑)
-  car: `${process.env.PUBLIC_URL}/images/Car.png`,      // 차량
+  me: `${process.env.PUBLIC_URL}/images/pin_r.png`,
+  dest: `${process.env.PUBLIC_URL}/images/pin_b.png`,
+  car: `${process.env.PUBLIC_URL}/images/Car.png`,
   otherYellow: `${process.env.PUBLIC_URL}/images/pin_y.png`,
   otherOrange: `${process.env.PUBLIC_URL}/images/pin_o.png`,
 };
 
-/* ====== 거리/투영 유틸 ====== */
+/* ====== 거리/투영 ====== */
 function haversineM(a, b) {
   const R = 6378137;
-  const toRad = (x) => x * Math.PI / 180;
+  const toRad = (x) => (x * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
   const dLon = toRad(b.lon - a.lon);
   const lat1 = toRad(a.lat);
   const lat2 = toRad(b.lat);
-  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 function metersPerPixelAtLat(lat, zoom) {
   const R = 6378137;
-  return Math.cos(lat * Math.PI/180) * 2 * Math.PI * R / (256 * Math.pow(2, zoom));
+  return (
+    (Math.cos((lat * Math.PI) / 180) * 2 * Math.PI * R) /
+    (256 * Math.pow(2, zoom))
+  );
 }
 
-/* ====== 마커 메타 ====== */
-function makeMarkerMeta(marker, base, userId) {
-  return { marker, base: { ...base }, userId };
+/* ====== 유틸 ====== */
+function makeMarkerMeta(marker, base, idKey) {
+  return { marker, base: { ...base }, idKey };
 }
 
-/* ====== RealTimeUpdate 래퍼 해제 ====== */
-function unwrapRTU(raw){
+/** RealTimeUpdate 래퍼 해제 */
+function unwrapRTU(raw) {
   const hasWrapper = raw && typeof raw === "object" && "payload" in raw;
   if (hasWrapper) return { type: raw.type || "UNKNOWN", payload: raw.payload };
   return { type: "LEGACY", payload: raw };
 }
 
-/* ====== timestamp 배열 → Date(옵션) ====== */
-function fromLocalDateTimeArray(arr){
-  // [yyyy, M, d, H, m, s, nano]
+/** [yyyy,M,d,H,m,s,(nano)] → Date */
+function fromLocalDateTimeArray(arr) {
   if (!Array.isArray(arr) || arr.length < 6) return null;
   const [y, M, d, H, m, s] = arr;
-  try { return new Date(y, (M-1), d, H, m, s); } catch { return null; }
+  try {
+    return new Date(y, M - 1, d, H, m, s);
+  } catch {
+    return null;
+  }
+}
+
+/** 문자열 해시(작은 정수) */
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 31 + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+/** 수신 메시지/헤더로부터 "발신자 키" 만들기 (userId가 없어도 고유키 생성) */
+function senderKey(p, headers = {}) {
+  const uid = p?.userId ?? p?.user?.id;
+  if (uid != null) return `u:${uid}`;
+  if (headers["x-user-id"]) return `h:${headers["x-user-id"]}`;
+  const alt = p?.deviceId || p?.clientId || p?.phone || p?.name;
+  if (alt) return `c:${String(alt)}`;
+  return `msg:${headers["message-id"] || Math.random().toString(36).slice(2)}`;
 }
 
 export default function MainMap() {
@@ -126,7 +153,7 @@ export default function MainMap() {
 
   const destMarkerRef = useRef(null);
 
-  /** 💡 차량 마커/좌표 (실시간 수신) */
+  // 차량 (실시간 수신)
   const carMarkerRef = useRef(null);
   const lastCarPosRef = useRef(null); // {lat, lon}
 
@@ -145,7 +172,7 @@ export default function MainMap() {
   const nav = useNavigate();
   const { state } = useLocation();
 
-  // ====== 실시간 위치 공유 ======
+  // ====== WebSocket/STOMP ======
   const stompRef = useRef(null);
   const wsRef = useRef(null);
   const subUserRef = useRef(null);
@@ -153,20 +180,27 @@ export default function MainMap() {
   const reconnectTimerRef = useRef(null);
   const watchIdRef = useRef(null);
 
-  // 다른 사용자 마커
+  // 가족 마커
   const otherMarkersRef = useRef(new Map());
   const myIdsRef = useRef({ userId: null, groupId: null, myName: null });
 
-  // 이름 캐시(간단)
+  // 이름 캐시 (idKey 기준)
   const nameCacheRef = useRef(new Map());
-  const getDisplayName = useCallback((uid) => {
-    if (uid == null) return "가족";
-    const key = String(uid);
+  const getDisplayName = useCallback((idKey) => {
+    const key = String(idKey ?? "");
     return nameCacheRef.current.get(key) || "가족";
   }, []);
-  const setCachedName = useCallback((uid, name) => {
-    if (uid == null || !name) return;
-    nameCacheRef.current.set(String(uid), String(name));
+  const setCachedName = useCallback((idKey, name) => {
+    if (!idKey || !name) return;
+    nameCacheRef.current.set(String(idKey), String(name));
+    const meta = otherMarkersRef.current.get(String(idKey));
+    if (meta?.marker) {
+      try {
+        if (typeof meta.marker.setTitle === "function")
+          meta.marker.setTitle(String(name));
+        else if (meta.marker.options) meta.marker.options.title = String(name);
+      } catch {}
+    }
   }, []);
 
   const handleInboundLog = useCallback((msg) => {
@@ -181,9 +215,17 @@ export default function MainMap() {
       me = state;
     } else {
       const saved = sessionStorage.getItem("auth");
-      if (saved) { try { const p=JSON.parse(saved); if (p?.name && p?.phone) me = p; } catch {} }
+      if (saved) {
+        try {
+          const p = JSON.parse(saved);
+          if (p?.name && p?.phone) me = p;
+        } catch {}
+      }
     }
-    if (!me) { nav("/", { replace: true }); return; }
+    if (!me) {
+      nav("/", { replace: true });
+      return;
+    }
     myIdsRef.current.userId = me.userId ?? null;
     myIdsRef.current.groupId = me.groupId ?? null;
     myIdsRef.current.myName = me.name ?? null;
@@ -194,36 +236,59 @@ export default function MainMap() {
     let cancelled = false;
     (async () => {
       const tag = document.getElementById("tmap-js-sdk");
-      if (!tag) { setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')"); return; }
+      if (!tag) {
+        setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')");
+        return;
+      }
 
       try {
         await waitForTmapV2();
         if (cancelled || didInitRef.current) return;
         const { Tmapv2 } = window;
-        if (!Tmapv2 || typeof Tmapv2.Map !== "function") { setStatus("지도 로드 실패: Tmap SDK 준비 안 됨"); return; }
+        if (!Tmapv2 || typeof Tmapv2.Map !== "function") {
+          setStatus("지도 로드 실패: Tmap SDK 준비 안 됨");
+          return;
+        }
 
-        if (mapRef.current?.destroy) { try { mapRef.current.destroy(); } catch {} }
+        if (mapRef.current?.destroy) {
+          try {
+            mapRef.current.destroy();
+          } catch {}
+        }
         const map = new window.Tmapv2.Map(mapDivRef.current, {
           center: new window.Tmapv2.LatLng(37.5666805, 126.9784147),
-          width: "100%", height: "100%", zoom: 15,
+          width: "100%",
+          height: "100%",
+          zoom: 15,
         });
         mapRef.current = map;
         didInitRef.current = true;
 
-        try { map.addListener("zoom_changed", () => recomputeLineLayout()); } catch {}
+        try {
+          map.addListener("zoom_changed", () => recomputeLineLayout());
+        } catch {}
 
         // 현재 위치
         if ("geolocation" in navigator) {
           navigator.geolocation.getCurrentPosition(
             ({ coords }) => {
-              const here = new window.Tmapv2.LatLng(coords.latitude, coords.longitude);
+              const here = new window.Tmapv2.LatLng(
+                coords.latitude,
+                coords.longitude
+              );
               map.setCenter(here);
               try {
                 hereMarkerRef.current = new window.Tmapv2.Marker({
-                  position: here, map, icon: ICONS.me, title: "현재 위치",
+                  position: here,
+                  map,
+                  icon: ICONS.me,
+                  title: "현재 위치",
                 });
               } catch {}
-              hereBaseRef.current = { lat: coords.latitude, lon: coords.longitude };
+              hereBaseRef.current = {
+                lat: coords.latitude,
+                lon: coords.longitude,
+              };
               setHerePos({ lat: coords.latitude, lon: coords.longitude });
               recomputeLineLayout();
               setStatus("");
@@ -238,7 +303,9 @@ export default function MainMap() {
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /* ===== WebSocket/STOMP 연결 & 위치 송수신 ===== */
@@ -249,14 +316,28 @@ export default function MainMap() {
       try {
         const token = getJwt();
         const { userId, groupId } = myIdsRef.current || {};
-        if (!token || !groupId) { console.warn("토큰 또는 groupId 없음 → STOMP 연결 보류", { token: !!token, groupId }); return; }
+        if (!token || !groupId) {
+          console.warn("토큰 또는 groupId 없음 → STOMP 연결 보류", {
+            token: !!token,
+            groupId,
+          });
+          return;
+        }
 
         await ensureStomp();
 
-        try { subUserRef.current?.unsubscribe(); } catch {}
-        try { subVehicleRef.current?.unsubscribe(); } catch {}
-        try { stompRef.current?.disconnect(() => {}); } catch {}
-        try { wsRef.current?.close?.(); } catch {}
+        try {
+          subUserRef.current?.unsubscribe();
+        } catch {}
+        try {
+          subVehicleRef.current?.unsubscribe();
+        } catch {}
+        try {
+          stompRef.current?.disconnect(() => {});
+        } catch {}
+        try {
+          wsRef.current?.close?.();
+        } catch {}
         clearTimeout(reconnectTimerRef.current);
 
         const socket = new WebSocket(WS_URL);
@@ -273,64 +354,84 @@ export default function MainMap() {
             console.log("✅ STOMP Connected");
             console.log("🔔 Subscribing topic:", `/topic/group/${groupId}`);
 
-            // (A) 사용자 위치(그룹) 구독 — 서버가 USER_UPDATE로 래핑해서 줄 수도 있음
-            subUserRef.current = stomp.subscribe(`/topic/group/${groupId}`, (message) => {
-              try {
-                const raw = JSON.parse(message.body);
-                const { type, payload } = unwrapRTU(raw);
-                handleInboundLog({ type, payload });
+            // (A) 사용자 위치
+            subUserRef.current = stomp.subscribe(
+              `/topic/group/${groupId}`,
+              (message) => {
+                try {
+                  const raw = JSON.parse(message.body);
+                  const { type, payload } = unwrapRTU(raw);
+                  handleInboundLog({ type, payload });
 
-                // 사용자 위치 (래퍼가 없어도 payload로 통일)
-                const p = type === "LEGACY" ? raw : payload;
-                const fromId = p?.userId ?? p?.user?.id ?? null;
-                const lat = Number(p?.latitude);
-                const lon = Number(p?.longitude);
-                const nm = p?.name ?? p?.userName ?? p?.nickname ?? p?.user?.name ?? null;
-                if (fromId != null && nm) setCachedName(fromId, nm);
+                  const p = type === "LEGACY" ? raw : payload;
+                  const lat = Number(p?.latitude);
+                  const lon = Number(p?.longitude);
+                  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
 
-                // 내 메시지는 무시
-                if (fromId != null && userId != null && Number(fromId) === Number(userId)) return;
-                if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-                placeOrMoveOtherMarker(fromId, lat, lon);
-              } catch (e) { console.warn("USER stream parse fail:", e, message?.body); }
-            });
+                  // 내 위치 메시지는 userId 있을 때만 필터
+                  const fromId = p?.userId ?? p?.user?.id ?? null;
+                  if (
+                    fromId != null &&
+                    myIdsRef.current?.userId != null &&
+                    Number(fromId) === Number(myIdsRef.current.userId)
+                  ) {
+                    return;
+                  }
 
-            // (B) 차량 위치(그룹) 구독 — 명세: /topic/group/{groupId}/location, type: VEHICLE_UPDATE
-            subVehicleRef.current = stomp.subscribe(`/topic/group/${groupId}/location`, (message) => {
-              try {
-                const raw = JSON.parse(message.body);
-                const { type, payload } = unwrapRTU(raw);
-                handleInboundLog({ type, payload });
+                  const key = senderKey(p, message.headers);
+                  const display =
+                    p?.name || p?.userName || p?.nickname || p?.user?.name;
+                  if (display) setCachedName(key, display);
 
-                if (type !== "VEHICLE_UPDATE") return;
-                const lat = Number(payload?.latitude);
-                const lon = Number(payload?.longitude);
-                const speed = payload?.speed;
-                const batt = payload?.batteryLevel;
-                const statusTxt = payload?.status;
-                const ts = fromLocalDateTimeArray(payload?.timestamp);
+                  placeOrMoveOtherMarker(key, lat, lon, display);
+                } catch (e) {
+                  console.warn("USER stream parse fail:", e, message?.body);
+                }
+              }
+            );
 
-                if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+            // (B) 차량 위치
+            subVehicleRef.current = stomp.subscribe(
+              `/topic/group/${groupId}/location`,
+              (message) => {
+                try {
+                  const raw = JSON.parse(message.body);
+                  const { type, payload } = unwrapRTU(raw);
+                  handleInboundLog({ type, payload });
 
-                // 차량 마커 생성/이동
-                moveVehicleMarker(lat, lon, {
-                  title:
-                    `차량` +
-                    (Number.isFinite(speed) ? ` • ${speed}km/h` : "") +
-                    (Number.isFinite(batt) ? ` • ${batt}%` : "") +
-                    (statusTxt ? ` • ${statusTxt}` : "") +
-                    (ts ? ` • ${ts.toLocaleString()}` : ""),
-                });
+                  if (type !== "VEHICLE_UPDATE") return;
 
-                // 차 → 내 위치 경로 갱신
-                lastCarPosRef.current = { lat, lon };
-                if (herePos) drawCarToHereRoute({ lat, lon }, herePos);
-              } catch (e) { console.warn("VEHICLE stream parse fail:", e, message?.body); }
-            });
+                  const lat = Number(payload?.latitude);
+                  const lon = Number(payload?.longitude);
+                  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
 
-            // (C) 내 위치 watch & 전송 (명세: 래퍼 없이 lat/lon만 전송)
+                  const speed = payload?.speed;
+                  const batt = payload?.batteryLevel;
+                  const statusTxt = payload?.status;
+                  const ts = fromLocalDateTimeArray(payload?.timestamp);
+
+                  moveVehicleMarker(lat, lon, {
+                    title:
+                      `차량` +
+                      (Number.isFinite(speed) ? ` • ${speed}km/h` : "") +
+                      (Number.isFinite(batt) ? ` • ${batt}%` : "") +
+                      (statusTxt ? ` • ${statusTxt}` : "") +
+                      (ts ? ` • ${ts.toLocaleString()}` : ""),
+                  });
+
+                  lastCarPosRef.current = { lat, lon };
+                  if (herePos) drawCarToHereRoute({ lat, lon }, herePos);
+                } catch (e) {
+                  console.warn("VEHICLE stream parse fail:", e, message?.body);
+                }
+              }
+            );
+
+            // (C) 내 위치 전송
             if ("geolocation" in navigator) {
-              try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
+              try {
+                navigator.geolocation.clearWatch(watchIdRef.current);
+              } catch {}
               watchIdRef.current = navigator.geolocation.watchPosition(
                 (pos) => {
                   const lat = pos.coords.latitude;
@@ -340,7 +441,9 @@ export default function MainMap() {
                     const body = JSON.stringify({ latitude: lat, longitude: lon });
                     console.log("📤 sending:", { latitude: lat, longitude: lon });
                     stomp.send("/app/location/update", {}, body);
-                  } catch (e) { console.warn("위치 전송 실패", e); }
+                  } catch (e) {
+                    console.warn("위치 전송 실패", e);
+                  }
                 },
                 (err) => console.warn("watchPosition 실패", err),
                 { enableHighAccuracy: true, maximumAge: 1500, timeout: 12000 }
@@ -362,25 +465,45 @@ export default function MainMap() {
       }
     };
 
-    // 지도 준비 & groupId 준비되면 연결
+    // 지도 & groupId 준비되면 연결
     const readyCheck = setInterval(() => {
       const hasMap = !!mapRef.current;
       const { groupId } = myIdsRef.current || {};
-      if (hasMap && groupId) { clearInterval(readyCheck); connect(); }
+      if (hasMap && groupId) {
+        clearInterval(readyCheck);
+        connect();
+      }
     }, 300);
 
     return () => {
       cancelled = true;
       clearInterval(readyCheck);
-      try { subUserRef.current?.unsubscribe(); } catch {}
-      try { subVehicleRef.current?.unsubscribe(); } catch {}
-      try { stompRef.current?.disconnect(() => {}); } catch {}
-      try { wsRef.current?.close?.(); } catch {}
-      try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
+      try {
+        subUserRef.current?.unsubscribe();
+      } catch {}
+      try {
+        subVehicleRef.current?.unsubscribe();
+      } catch {}
+      try {
+        stompRef.current?.disconnect(() => {});
+      } catch {}
+      try {
+        wsRef.current?.close?.();
+      } catch {}
+      try {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      } catch {}
       clearTimeout(reconnectTimerRef.current);
-      for (const meta of otherMarkersRef.current.values()) { try { meta.marker.setMap(null); } catch {} }
+
+      for (const meta of otherMarkersRef.current.values()) {
+        try {
+          meta.marker.setMap(null);
+        } catch {}
+      }
       otherMarkersRef.current.clear();
-      try { carMarkerRef.current?.setMap(null); } catch {}
+      try {
+        carMarkerRef.current?.setMap(null);
+      } catch {}
     };
   }, [handleInboundLog, setCachedName, getDisplayName]); // eslint-disable-line
 
@@ -402,14 +525,16 @@ export default function MainMap() {
       if (d <= clusterM) near.push({ meta });
     });
 
-    near.sort((a, b) => {
-      const ua = Number(a.meta.userId ?? 0) || 0;
-      const ub = Number(b.meta.userId ?? 0) || 0;
-      return ua - ub;
-    });
+    // idKey 기준으로 안정 정렬
+    near.sort((a, b) => (a.meta.idKey || "").localeCompare(b.meta.idKey || ""));
 
-    const R = 6378137, rad = Math.PI / 180;
-    try { hereMarkerRef.current?.setPosition(new window.Tmapv2.LatLng(meLat, meLon)); } catch {}
+    const R = 6378137,
+      rad = Math.PI / 180;
+    try {
+      hereMarkerRef.current?.setPosition(
+        new window.Tmapv2.LatLng(meLat, meLon)
+      );
+    } catch {}
 
     for (let i = 0; i < near.length; i++) {
       const sign = i % 2 === 0 ? 1 : -1;
@@ -418,13 +543,19 @@ export default function MainMap() {
       const dLon = (offsetM / (R * Math.cos(meLat * rad))) * (180 / Math.PI);
       const adj = { lat: meLat, lon: meLon + dLon };
       const { marker } = near[i].meta;
-      try { marker.setPosition(new window.Tmapv2.LatLng(adj.lat, adj.lon)); } catch {}
+      try {
+        marker.setPosition(new window.Tmapv2.LatLng(adj.lat, adj.lon));
+      } catch {}
     }
 
     otherMarkersRef.current.forEach((meta) => {
       const inNear = near.some((x) => x.meta === meta);
       if (!inNear) {
-        try { meta.marker.setPosition(new window.Tmapv2.LatLng(meta.base.lat, meta.base.lon)); } catch {}
+        try {
+          meta.marker.setPosition(
+            new window.Tmapv2.LatLng(meta.base.lat, meta.base.lon)
+          );
+        } catch {}
       }
     });
   }
@@ -434,42 +565,44 @@ export default function MainMap() {
       setHerePos({ lat, lon });
       hereBaseRef.current = { lat, lon };
       if (mapRef.current && window.Tmapv2) recomputeLineLayout();
-      // 차 경로 즉시 업데이트
       if (lastCarPosRef.current) drawCarToHereRoute(lastCarPosRef.current, { lat, lon });
     } catch {}
   }
 
-  function placeOrMoveOtherMarker(userId, lat, lon) {
+  /** idKey 기반으로 가족 마커 배치 */
+  function placeOrMoveOtherMarker(idKey, lat, lon, displayName) {
     if (!mapRef.current || !window.Tmapv2) return;
-    const idKey = userId == null ? "unknown" : String(userId);
-
-    let meta = otherMarkersRef.current.get(idKey);
+    const key = String(idKey || "unknown");
+    let meta = otherMarkersRef.current.get(key);
     const base = { lat, lon };
-    const titleNow = getDisplayName(userId);
+    const titleNow = displayName || getDisplayName(key);
 
     if (!meta) {
-      const even = userId != null && Number(userId) % 2 === 0;
-      const icon = even ? ICONS.otherYellow : ICONS.otherOrange;
+      const h = hashStr(key);
+      const icon = h % 2 === 0 ? ICONS.otherYellow : ICONS.otherOrange;
       const marker = new window.Tmapv2.Marker({
         position: new window.Tmapv2.LatLng(base.lat, base.lon),
         map: mapRef.current,
         icon,
         title: titleNow,
       });
-      meta = makeMarkerMeta(marker, base, userId);
-      otherMarkersRef.current.set(idKey, meta);
+      meta = makeMarkerMeta(marker, base, key);
+      otherMarkersRef.current.set(key, meta);
     } else {
       meta.base = base;
       try {
-        if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(titleNow);
+        if (typeof meta.marker.setTitle === "function")
+          meta.marker.setTitle(titleNow);
         else meta.marker.options && (meta.marker.options.title = titleNow);
       } catch {}
-      try { meta.marker.setPosition(new window.Tmapv2.LatLng(base.lat, base.lon)); } catch {}
+      try {
+        meta.marker.setPosition(new window.Tmapv2.LatLng(base.lat, base.lon));
+      } catch {}
     }
     recomputeLineLayout();
   }
 
-  /** 🚗 차량 마커를 생성/이동 */
+  /** 🚗 차량 마커 생성/이동 */
   function moveVehicleMarker(lat, lon, { title } = {}) {
     if (!mapRef.current || !window.Tmapv2) return;
     if (!carMarkerRef.current) {
@@ -482,22 +615,32 @@ export default function MainMap() {
         });
       } catch {}
     } else {
-      try { carMarkerRef.current.setPosition(new window.Tmapv2.LatLng(lat, lon)); } catch {}
+      try {
+        carMarkerRef.current.setPosition(new window.Tmapv2.LatLng(lat, lon));
+      } catch {}
       try {
         if (title) {
-          if (typeof carMarkerRef.current.setTitle === "function") carMarkerRef.current.setTitle(title);
-          else carMarkerRef.current.options && (carMarkerRef.current.options.title = title);
+          if (typeof carMarkerRef.current.setTitle === "function")
+            carMarkerRef.current.setTitle(title);
+          else
+            carMarkerRef.current.options &&
+              (carMarkerRef.current.options.title = title);
         }
       } catch {}
     }
   }
 
-  /* ===== 이하: 검색/경로 로직 ===== */
+  /* ===== 검색/경로 ===== */
   const debounceRef = useRef(null);
   const abortRef = useRef(null);
   useEffect(() => {
     const keyword = query.trim();
-    if (!keyword) { setResults([]); setOpen(false); abortRef.current?.abort(); return; }
+    if (!keyword) {
+      setResults([]);
+      setOpen(false);
+      abortRef.current?.abort();
+      return;
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       try {
@@ -507,7 +650,8 @@ export default function MainMap() {
 
         const appKey = process.env.REACT_APP_TMAP_APPKEY;
         const center = mapRef.current?.getCenter?.();
-        const centerLat = center?._lat, centerLon = center?._lng;
+        const centerLat = center?._lat,
+          centerLon = center?._lng;
 
         const url = new URL("https://apis.openapi.sk.com/tmap/pois");
         url.searchParams.set("version", "1");
@@ -531,22 +675,46 @@ export default function MainMap() {
         const list = Array.isArray(pois) ? pois : [pois];
 
         const toNum = (v) => (v == null ? NaN : Number(String(v).trim()));
-        const items = list.map((p) => {
-          const latStr = p.frontLat ?? p.noorLat ?? p.lat ?? p.centerLat ?? p.newLat;
-          const lonStr = p.frontLon ?? p.noorLon ?? p.lon ?? p.centerLon ?? p.newLon;
-          const lat = toNum(latStr), lon = toNum(lonStr);
-          return {
-            id: p.id, name: p.name,
-            addr: p?.newAddressList?.newAddress?.[0]?.fullAddressRoad ??
-                  [p.upperAddrName, p.middleAddrName, p.lowerAddrName, p.roadName, p.buildingNo].filter(Boolean).join(" "),
-            lat, lon, _raw: p,
-          };
-        }).filter((it) => Number.isFinite(it.lat) && Number.isFinite(it.lon));
+        const items = list
+          .map((p) => {
+            const latStr =
+              p.frontLat ?? p.noorLat ?? p.lat ?? p.centerLat ?? p.newLat;
+            const lonStr =
+              p.frontLon ?? p.noorLon ?? p.lon ?? p.centerLon ?? p.newLon;
+            const lat = toNum(latStr),
+              lon = toNum(lonStr);
+            return {
+              id: p.id,
+              name: p.name,
+              addr:
+                p?.newAddressList?.newAddress?.[0]?.fullAddressRoad ??
+                [
+                  p.upperAddrName,
+                  p.middleAddrName,
+                  p.lowerAddrName,
+                  p.roadName,
+                  p.buildingNo,
+                ]
+                  .filter(Boolean)
+                  .join(" "),
+              lat,
+              lon,
+              _raw: p,
+            };
+          })
+          .filter((it) => Number.isFinite(it.lat) && Number.isFinite(it.lon));
 
-        setResults(items); setOpen(true);
+        setResults(items);
+        setOpen(true);
       } catch (e) {
-        if (e.name !== "AbortError") { console.error(e); setResults([]); setOpen(false); }
-      } finally { setLoading(false); }
+        if (e.name !== "AbortError") {
+          console.error(e);
+          setResults([]);
+          setOpen(false);
+        }
+      } finally {
+        setLoading(false);
+      }
     }, 250);
 
     return () => clearTimeout(debounceRef.current);
@@ -557,15 +725,22 @@ export default function MainMap() {
     const map = mapRef.current;
     if (!map || !window.Tmapv2) return;
     const pos = new window.Tmapv2.LatLng(selectedPlace.lat, selectedPlace.lon);
-    map.setCenter(pos); map.setZoom(16);
+    map.setCenter(pos);
+    map.setZoom(16);
     try {
       if (destMarkerRef.current) destMarkerRef.current.setMap(null);
       destMarkerRef.current = new window.Tmapv2.Marker({
-        position: pos, map, icon: ICONS.dest, title: selectedPlace.name,
+        position: pos,
+        map,
+        icon: ICONS.dest,
+        title: selectedPlace.name,
       });
     } catch {}
     if (herePos) {
-      drawRoute(herePos, { lat: selectedPlace.lat, lon: selectedPlace.lon });
+      drawRoute(herePos, {
+        lat: selectedPlace.lat,
+        lon: selectedPlace.lon,
+      });
     }
   }, [selectedPlace, herePos]);
 
@@ -580,7 +755,8 @@ export default function MainMap() {
       if (!mapRef.current) return;
       const appKey = process.env.REACT_APP_TMAP_APPKEY;
       if (!appKey) return alert("TMAP AppKey가 없습니다.");
-      if (![start, end].every(p => Number.isFinite(p.lat) && Number.isFinite(p.lon))) return;
+      if (![start, end].every((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)))
+        return;
 
       if (routeLineRef.current) {
         routeLineRef.current.halo?.setMap(null);
@@ -589,14 +765,29 @@ export default function MainMap() {
       }
 
       const url = "https://apis.openapi.sk.com/tmap/routes?version=1&format=json";
-      const body = { startX:start.lon, startY:start.lat, endX:end.lon, endY:end.lat, reqCoordType:"WGS84GEO", resCoordType:"WGS84GEO", trafficInfo:"Y" };
+      const body = {
+        startX: start.lon,
+        startY: start.lat,
+        endX: end.lon,
+        endY: end.lat,
+        reqCoordType: "WGS84GEO",
+        resCoordType: "WGS84GEO",
+        trafficInfo: "Y",
+      };
 
       const res = await fetch(url, {
-        method:"POST",
-        headers:{ "content-type":"application/json", accept:"application/json", appKey },
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          appKey,
+        },
         body: JSON.stringify(body),
       });
-      if (!res.ok) { console.error("경로 API 실패:", res.status, await res.text()); return alert("경로 API 호출 실패"); }
+      if (!res.ok) {
+        console.error("경로 API 실패:", res.status, await res.text());
+        return alert("경로 API 호출 실패");
+      }
 
       const data = await res.json();
       const features = data?.features ?? [];
@@ -604,21 +795,40 @@ export default function MainMap() {
       for (const f of features) {
         if (f?.geometry?.type === "LineString") {
           for (const c of f.geometry.coordinates) {
-            const x = Number(c[0]), y = Number(c[1]);
-            if (Number.isFinite(x) && Number.isFinite(y)) pts.push(new window.Tmapv2.LatLng(y, x));
+            const x = Number(c[0]),
+              y = Number(c[1]);
+            if (Number.isFinite(x) && Number.isFinite(y))
+              pts.push(new window.Tmapv2.LatLng(y, x));
           }
         }
       }
       if (!pts.length) return alert("경로 선 정보를 찾지 못했습니다.");
 
-      const halo = new window.Tmapv2.Polyline({ map:mapRef.current, path:pts, strokeColor:"#FFFFFF", strokeWeight:10, strokeOpacity:1, zIndex:9998 });
-      const main = new window.Tmapv2.Polyline({ map:mapRef.current, path:pts, strokeColor:"#0066FF", strokeWeight:6, strokeOpacity:1, zIndex:9999 });
+      const halo = new window.Tmapv2.Polyline({
+        map: mapRef.current,
+        path: pts,
+        strokeColor: "#FFFFFF",
+        strokeWeight: 10,
+        strokeOpacity: 1,
+        zIndex: 9998,
+      });
+      const main = new window.Tmapv2.Polyline({
+        map: mapRef.current,
+        path: pts,
+        strokeColor: "#0066FF",
+        strokeWeight: 6,
+        strokeOpacity: 1,
+        zIndex: 9999,
+      });
       routeLineRef.current = { halo, main };
 
       const bounds = new window.Tmapv2.LatLngBounds();
-      pts.forEach(p => bounds.extend(p));
+      pts.forEach((p) => bounds.extend(p));
       mapRef.current.fitBounds(bounds);
-    } catch (e) { console.error("경로 그리기 실패:", e); alert("경로를 불러오는 중 오류"); }
+    } catch (e) {
+      console.error("경로 그리기 실패:", e);
+      alert("경로를 불러오는 중 오류");
+    }
   };
 
   const drawCarToHereRoute = async (start, end) => {
@@ -626,7 +836,8 @@ export default function MainMap() {
       if (!mapRef.current) return;
       const appKey = process.env.REACT_APP_TMAP_APPKEY;
       if (!appKey) return; // 조용히 무시
-      if (![start, end].every(p => Number.isFinite(p.lat) && Number.isFinite(p.lon))) return;
+      if (![start, end].every((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)))
+        return;
 
       if (carRouteRef.current) {
         carRouteRef.current.halo?.setMap(null);
@@ -635,14 +846,32 @@ export default function MainMap() {
       }
 
       const url = "https://apis.openapi.sk.com/tmap/routes?version=1&format=json";
-      const body = { startX:Number(start.lon), startY:Number(start.lat), endX:Number(end.lon), endY:Number(end.lat), reqCoordType:"WGS84GEO", resCoordType:"WGS84GEO", trafficInfo:"N", searchOption:0, startName:"차량", endName:"내 위치" };
+      const body = {
+        startX: Number(start.lon),
+        startY: Number(start.lat),
+        endX: Number(end.lon),
+        endY: Number(end.lat),
+        reqCoordType: "WGS84GEO",
+        resCoordType: "WGS84GEO",
+        trafficInfo: "N",
+        searchOption: 0,
+        startName: "차량",
+        endName: "내 위치",
+      };
 
       const res = await fetch(url, {
-        method:"POST",
-        headers:{ "content-type":"application/json", accept:"application/json", appKey },
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          appKey,
+        },
         body: JSON.stringify(body),
       });
-      if (!res.ok) { console.error("차→나 경로 실패:", res.status, await res.text()); return; }
+      if (!res.ok) {
+        console.error("차→나 경로 실패:", res.status, await res.text());
+        return;
+      }
 
       const data = await res.json();
       const features = data?.features ?? [];
@@ -650,27 +879,59 @@ export default function MainMap() {
       for (const f of features) {
         if (f?.geometry?.type === "LineString") {
           for (const [lon, lat] of f.geometry.coordinates) {
-            if (Number.isFinite(lon) && Number.isFinite(lat)) pts.push(new window.Tmapv2.LatLng(lat, lon));
+            if (Number.isFinite(lon) && Number.isFinite(lat))
+              pts.push(new window.Tmapv2.LatLng(lat, lon));
           }
         }
       }
       if (!pts.length) return;
 
-      const halo = new window.Tmapv2.Polyline({ map:mapRef.current, path:pts, strokeColor:"#FFFFFF", strokeWeight:10, strokeOpacity:1, zIndex:9996 });
-      const main = new window.Tmapv2.Polyline({ map:mapRef.current, path:pts, strokeColor:"#FF2D55", strokeWeight:6, strokeOpacity:1, zIndex:9997 });
+      const halo = new window.Tmapv2.Polyline({
+        map: mapRef.current,
+        path: pts,
+        strokeColor: "#FFFFFF",
+        strokeWeight: 10,
+        strokeOpacity: 1,
+        zIndex: 9996,
+      });
+      const main = new window.Tmapv2.Polyline({
+        map: mapRef.current,
+        path: pts,
+        strokeColor: "#FF2D55",
+        strokeWeight: 6,
+        strokeOpacity: 1,
+        zIndex: 9997,
+      });
       carRouteRef.current = { halo, main };
-    } catch (e) { console.error("차→나 경로 그리기 실패:", e); }
+    } catch (e) {
+      console.error("차→나 경로 그리기 실패:", e);
+    }
   };
 
   const pickResult = (item) => {
-    setQuery(item.name); setOpen(false);
-    if (!Number.isFinite(item.lat) || !Number.isFinite(item.lon)) { alert("선택한 장소의 좌표가 없습니다."); return; }
+    setQuery(item.name);
+    setOpen(false);
+    if (!Number.isFinite(item.lat) || !Number.isFinite(item.lon)) {
+      alert("선택한 장소의 좌표가 없습니다.");
+      return;
+    }
     setSelectedPlace(item);
   };
   const clearQuery = () => {
-    setQuery(""); setResults([]); setOpen(false); setSelectedPlace(null); setStatus("");
-    if (destMarkerRef.current) { destMarkerRef.current.setMap(null); destMarkerRef.current = null; }
-    if (routeLineRef.current) { routeLineRef.current.halo?.setMap(null); routeLineRef.current.main?.setMap(null); routeLineRef.current = null; }
+    setQuery("");
+    setResults([]);
+    setOpen(false);
+    setSelectedPlace(null);
+    setStatus("");
+    if (destMarkerRef.current) {
+      destMarkerRef.current.setMap(null);
+      destMarkerRef.current = null;
+    }
+    if (routeLineRef.current) {
+      routeLineRef.current.halo?.setMap(null);
+      routeLineRef.current.main?.setMap(null);
+      routeLineRef.current = null;
+    }
   };
 
   return (
@@ -680,22 +941,38 @@ export default function MainMap() {
           <span className="pin">📍</span>
           <input
             value={query}
-            onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
-            onFocus={() => { setOpen(Boolean(query)); }}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setOpen(true);
+            }}
+            onFocus={() => {
+              setOpen(Boolean(query));
+            }}
             placeholder="도착지 검색(장소명)"
           />
-          {query && <button className="clearBtn" onClick={clearQuery} aria-label="지우기">×</button>}
+          {query && (
+            <button className="clearBtn" onClick={clearQuery} aria-label="지우기">
+              ×
+            </button>
+          )}
         </div>
         {open && (results.length > 0 || loading) && (
           <div className="resultBox">
             {loading && <div className="hint">검색 중…</div>}
-            {!loading && results.map((r) => (
-              <button key={`${r.id}-${r.name}`} className="resultItem" onClick={() => pickResult(r)}>
-                <div className="rTitle">{r.name}</div>
-                <div className="rAddr">{r.addr}</div>
-              </button>
-            ))}
-            {!loading && results.length === 0 && <div className="hint">검색 결과가 없습니다</div>}
+            {!loading &&
+              results.map((r) => (
+                <button
+                  key={`${r.id}-${r.name}`}
+                  className="resultItem"
+                  onClick={() => pickResult(r)}
+                >
+                  <div className="rTitle">{r.name}</div>
+                  <div className="rAddr">{r.addr}</div>
+                </button>
+              ))}
+            {!loading && results.length === 0 && (
+              <div className="hint">검색 결과가 없습니다</div>
+            )}
           </div>
         )}
       </div>
