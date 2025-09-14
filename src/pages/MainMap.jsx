@@ -3,8 +3,9 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 /* ====== 공통 설정 ====== */
-export const CAR_POS = Object.freeze({ lat: 37.5666805, lon: 126.9784147 });
 const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(/\/$/, "");
+
+/* STT 예: 다른 곳에서 쓰면 유지 */
 const STT_URL = API_BASE ? `${API_BASE}/api/stt` : "/api/stt";
 
 /* WebSocket URL 결정 (API_BASE 기준, 없으면 현재 호스트) */
@@ -24,6 +25,7 @@ const WS_URL = (() => {
 /** 일렬 배치(가로) 간격 설정 (반쯤 겹치게) */
 const LINE_LAYOUT = { desiredPx: 18, clusterPx: 14 };
 
+/** JWT */
 const setJwt = (t) => { try { if (t) sessionStorage.setItem("jwt", t); } catch {} };
 const getJwt = () => {
   try {
@@ -39,23 +41,13 @@ const getJwt = () => {
   }
 };
 
-/* ====== 녹음기 ====== */
-class WavRecorder {
-  constructor(stream, ctx, source, proc) { this.stream=stream; this.ctx=ctx; this.source=source; this.proc=proc; this.chunks=[]; }
-  static async create(){ const s=await navigator.mediaDevices.getUserMedia({audio:true}); const AC=window.AudioContext||window.webkitAudioContext; const ctx=new AC(); const src=ctx.createMediaStreamSource(s); const p=ctx.createScriptProcessor(4096,1,1); return new WavRecorder(s,ctx,src,p); }
-  start(){ this.chunks=[]; this.proc.onaudioprocess=(e)=>{ const i=e.inputBuffer.getChannelData(0); this.chunks.push(new Float32Array(i)); }; this.source.connect(this.proc); this.proc.connect(this.ctx.destination); }
-  async stop(){ this.proc.disconnect(); this.source.disconnect(); this.stream.getTracks().forEach(t=>t.stop()); try{await this.ctx.close();}catch{} const rate=this.ctx.sampleRate; let total=0; for(const c of this.chunks) total+=c.length; const buf=new Float32Array(total); let off=0; for(const c of this.chunks){ buf.set(c,off); off+=c.length; } const ds=downsampleBuffer(buf,rate,16000); const wavAB=encodeWAV(ds,16000); return new Blob([wavAB],{type:"audio/wav"}); }
-}
-function downsampleBuffer(buffer,srcRate,dstRate){ if(dstRate===srcRate) return buffer; const r=srcRate/dstRate; const len=Math.round(buffer.length/r); const out=new Float32Array(len); let o=0,i=0; while(o<len){ const next=Math.round((o+1)*r); let sum=0,cnt=0; for(; i<next && i<buffer.length; i++){ sum+=buffer[i]; cnt++; } out[o++]=sum/(cnt||1); } return out; }
-function encodeWAV(samples,sampleRate){ const bps=2,ba=bps*1; const buf=new ArrayBuffer(44+samples.length*bps); const v=new DataView(buf); const ws=(s,o)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}; ws("RIFF",0); v.setUint32(4,36+samples.length*bps,true); ws("WAVE",8); ws("fmt ",12); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,sampleRate,true); v.setUint32(28,sampleRate*ba,true); v.setUint16(32,ba,true); v.setUint16(34,16,true); ws("data",36); v.setUint32(40,samples.length*bps,true); let off=44; for(let i=0;i<samples.length;i++,off+=2){ let s=Math.max(-1,Math.min(1,samples[i])); v.setInt16(off,s<0?s*0x8000:s*0x7fff,true);} return buf; }
-
 /* ====== Tmap SDK 준비 대기 ====== */
-function waitForTmapV2({ timeoutMs = 12000, intervalMs = 50 } = {}) {
+function waitForTmapV2({ timeoutMs = 15000, intervalMs = 50 } = {}) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const tick = () => {
       const T = window.Tmapv2;
-      const ok = T && typeof T.Map==="function" && typeof T.LatLng==="function" && T.Map.prototype && T.LatLng.prototype;
+      const ok = T && typeof T.Map==="function" && typeof T.LatLng==="function";
       if (ok) return resolve(T);
       if (Date.now()-start > timeoutMs) return reject(new Error("Tmap SDK not ready"));
       setTimeout(tick, intervalMs);
@@ -81,53 +73,12 @@ async function ensureStomp() {
 
 /* ====== 아이콘 경로 ====== */
 const ICONS = {
-  me: `${process.env.PUBLIC_URL}/images/pin_r.png`,
-  dest: `${process.env.PUBLIC_URL}/images/pin_b.png`,
-  car: `${process.env.PUBLIC_URL}/images/Car.png`,
+  me: `${process.env.PUBLIC_URL}/images/pin_r.png`,     // 내 위치 (빨강)
+  dest: `${process.env.PUBLIC_URL}/images/pin_b.png`,   // 목적지 (파랑)
+  car: `${process.env.PUBLIC_URL}/images/Car.png`,      // 차량
   otherYellow: `${process.env.PUBLIC_URL}/images/pin_y.png`,
   otherOrange: `${process.env.PUBLIC_URL}/images/pin_o.png`,
 };
-
-/* ====== API 유틸 (이름 조회) ====== */
-const apiUrl = (path) => {
-  const base = API_BASE || "";
-  if (!base) return path.startsWith("/") ? path : `/${path}`;
-  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
-};
-const MEMBER_ENDPOINT_PATHS = [
-  (gid) => `/api/group/${gid}/members`,
-  (gid) => `/api/family/${gid}/members`,
-  (gid) => `/api/groups/${gid}/members`,
-  (gid) => `/api/family/members?groupId=${encodeURIComponent(gid)}`,
-  (gid) => `/api/members?groupId=${encodeURIComponent(gid)}`,
-];
-async function fetchGroupMembers(gid, token) {
-  if (!gid) return {};
-  for (const build of MEMBER_ENDPOINT_PATHS) {
-    const url = apiUrl(build(gid));
-    try {
-      const r = await fetch(url, {
-        headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        credentials: "include",
-      });
-      const t = await r.text().catch(() => "");
-      if (!r.ok) continue;
-      let raw; try { raw = JSON.parse(t); } catch { raw = {}; }
-      const arr =
-        raw?.data?.members ?? raw?.members ?? raw?.data ?? raw?.list ??
-        (Array.isArray(raw) ? raw : raw?.content);
-      const list = Array.isArray(arr) ? arr : [];
-      const pairs = [];
-      for (const it of list) {
-        const uid = it?.userId ?? it?.id ?? it?.user?.id ?? null;
-        const name = it?.name ?? it?.userName ?? it?.nickname ?? it?.user?.name ?? null;
-        if (uid != null && name) pairs.push([String(uid), String(name)]);
-      }
-      if (pairs.length) return Object.fromEntries(pairs);
-    } catch {}
-  }
-  return {};
-}
 
 /* ====== 거리/투영 유틸 ====== */
 function haversineM(a, b) {
@@ -150,8 +101,20 @@ function makeMarkerMeta(marker, base, userId) {
   return { marker, base: { ...base }, userId };
 }
 
-/* ====== 공용 말풍선 ====== */
-function esc(s=""){return String(s).replace(/[&<>"']/g,(m)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));}
+/* ====== RealTimeUpdate 래퍼 해제 ====== */
+function unwrapRTU(raw){
+  const hasWrapper = raw && typeof raw === "object" && "payload" in raw;
+  if (hasWrapper) return { type: raw.type || "UNKNOWN", payload: raw.payload };
+  return { type: "LEGACY", payload: raw };
+}
+
+/* ====== timestamp 배열 → Date(옵션) ====== */
+function fromLocalDateTimeArray(arr){
+  // [yyyy, M, d, H, m, s, nano]
+  if (!Array.isArray(arr) || arr.length < 6) return null;
+  const [y, M, d, H, m, s] = arr;
+  try { return new Date(y, (M-1), d, H, m, s); } catch { return null; }
+}
 
 export default function MainMap() {
   const mapDivRef = useRef(null);
@@ -160,11 +123,15 @@ export default function MainMap() {
 
   const hereMarkerRef = useRef(null);
   const hereBaseRef = useRef({ lat: null, lon: null });
+
   const destMarkerRef = useRef(null);
+
+  /** 💡 차량 마커/좌표 (실시간 수신) */
   const carMarkerRef = useRef(null);
+  const lastCarPosRef = useRef(null); // {lat, lon}
+
   const routeLineRef = useRef(null);
   const carRouteRef = useRef(null);
-  const infoRef = useRef(null); // ✅ 단일 InfoWindow
 
   const [herePos, setHerePos] = useState(null);
   const [status, setStatus] = useState("지도 로딩 중…");
@@ -178,75 +145,32 @@ export default function MainMap() {
   const nav = useNavigate();
   const { state } = useLocation();
 
-  const [recorder, setRecorder] = useState(null);
-  const [recState, setRecState] = useState("idle");
-  const uploadAbortRef = useRef(null);
-
   // ====== 실시간 위치 공유 ======
   const stompRef = useRef(null);
   const wsRef = useRef(null);
-  const subRef = useRef(null);
+  const subUserRef = useRef(null);
+  const subVehicleRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const watchIdRef = useRef(null);
 
-  // userId -> { marker, base:{lat,lon}, userId }
+  // 다른 사용자 마커
   const otherMarkersRef = useRef(new Map());
   const myIdsRef = useRef({ userId: null, groupId: null, myName: null });
 
-  // ====== 이름 캐시 ======
+  // 이름 캐시(간단)
   const nameCacheRef = useRef(new Map());
   const getDisplayName = useCallback((uid) => {
     if (uid == null) return "가족";
     const key = String(uid);
-    const m = nameCacheRef.current.get(key);
-    if (m) return m;
-    try {
-      const dict = JSON.parse(sessionStorage.getItem("familyNames") || "{}");
-      if (dict[key]) {
-        nameCacheRef.current.set(key, dict[key]);
-        return dict[key];
-      }
-    } catch {}
-    return "가족";
+    return nameCacheRef.current.get(key) || "가족";
   }, []);
   const setCachedName = useCallback((uid, name) => {
     if (uid == null || !name) return;
-    const key = String(uid);
-    const nm = String(name);
-    nameCacheRef.current.set(key, nm);
-    try {
-      const dict = JSON.parse(sessionStorage.getItem("familyNames") || "{}");
-      dict[key] = nm;
-      sessionStorage.setItem("familyNames", JSON.stringify(dict));
-    } catch {}
-    const meta = otherMarkersRef.current.get(key);
-    if (meta?.marker) {
-      try {
-        if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(nm);
-        else if (meta.marker.options) meta.marker.options.title = nm;
-      } catch {}
-    }
+    nameCacheRef.current.set(String(uid), String(name));
   }, []);
 
-  // 디버그
-  const handleIncomingLocation = useCallback((msg) => {
-    console.log("📡 그룹 위치 수신:", msg);
-  }, []);
-
-  // 녹음 토글 (생략: 기존 그대로)
-  // ... (중략: 녹음 관련 코드 동일, 변동 없음)
-
-  const [compare, setCompare] = useState(null);
-  const compareRef = useRef(null);
-  const compareBackupRef = useRef(null);
-  const drawerHidCompareRef = useRef(false);
-  useEffect(() => { compareRef.current = compare; }, [compare]);
-  useEffect(() => {
-    const onOpen = () => { if (compareRef.current){ compareBackupRef.current=compareRef.current; drawerHidCompareRef.current=true; setCompare(null);} };
-    const onClose = () => { if (drawerHidCompareRef.current && compareBackupRef.current){ setCompare(compareBackupRef.current);} drawerHidCompareRef.current=false; compareBackupRef.current=null; };
-    window.addEventListener("app/drawer-open", onOpen);
-    window.addEventListener("app/drawer-close", onClose);
-    return () => { window.removeEventListener("app/drawer-open", onOpen); window.removeEventListener("app/drawer-close", onClose); };
+  const handleInboundLog = useCallback((msg) => {
+    console.log("📩 inbound:", msg);
   }, []);
 
   // 로그인 복구
@@ -265,39 +189,15 @@ export default function MainMap() {
     myIdsRef.current.myName = me.name ?? null;
   }, [state, nav]);
 
-  /* ===== 공용 말풍선 표시 ===== */
-  function showBubbleAt(lat, lon, text) {
-    if (!mapRef.current || !window.Tmapv2) return;
-    try { infoRef.current?.setMap(null); } catch {}
-    try {
-      infoRef.current = new window.Tmapv2.InfoWindow({
-        map: mapRef.current,
-        position: new window.Tmapv2.LatLng(lat, lon),
-        content: `<div style="padding:6px 10px;border-radius:8px;background:#30313a;color:#fff;font-weight:700;font-size:13px;white-space:nowrap;">${esc(text)}</div>`,
-        type: 2, // 기본 말풍선
-      });
-    } catch {}
-  }
-  function showMarkerName(marker, fallbackName) {
-    try {
-      const p = marker.getPosition?.();
-      const lat = p?.getLat ? p.getLat() : (p?._lat ?? hereBaseRef.current.lat);
-      const lon = p?.getLng ? p.getLng() : (p?._lng ?? hereBaseRef.current.lon);
-      const title = typeof marker.getTitle === "function" ? marker.getTitle() : (marker.options?.title || fallbackName);
-      showBubbleAt(lat, lon, title || fallbackName || "가족");
-    } catch {}
-  }
-
   /* ===== 지도 초기화 ===== */
   useEffect(() => {
     let cancelled = false;
-
     (async () => {
       const tag = document.getElementById("tmap-js-sdk");
       if (!tag) { setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')"); return; }
 
       try {
-        await waitForTmapV2({ timeoutMs: 15000, intervalMs: 50 });
+        await waitForTmapV2();
         if (cancelled || didInitRef.current) return;
         const { Tmapv2 } = window;
         if (!Tmapv2 || typeof Tmapv2.Map !== "function") { setStatus("지도 로드 실패: Tmap SDK 준비 안 됨"); return; }
@@ -310,16 +210,7 @@ export default function MainMap() {
         mapRef.current = map;
         didInitRef.current = true;
 
-        // 줌 변경 시 레이아웃 갱신
         try { map.addListener("zoom_changed", () => recomputeLineLayout()); } catch {}
-
-        // 차량 마커
-        try {
-          carMarkerRef.current = new window.Tmapv2.Marker({
-            position: new window.Tmapv2.LatLng(CAR_POS.lat, CAR_POS.lon),
-            map, icon: ICONS.car, title: "차량",
-          });
-        } catch {}
 
         // 현재 위치
         if ("geolocation" in navigator) {
@@ -328,16 +219,13 @@ export default function MainMap() {
               const here = new window.Tmapv2.LatLng(coords.latitude, coords.longitude);
               map.setCenter(here);
               try {
-                const m = new window.Tmapv2.Marker({
+                hereMarkerRef.current = new window.Tmapv2.Marker({
                   position: here, map, icon: ICONS.me, title: "현재 위치",
                 });
-                hereMarkerRef.current = m;
-                // ✅ 클릭 시 '현재 위치'
-                m.addListener?.("click", () => showMarkerName(m, "현재 위치"));
-                hereBaseRef.current = { lat: coords.latitude, lon: coords.longitude };
-                setHerePos({ lat: coords.latitude, lon: coords.longitude });
-                recomputeLineLayout();
               } catch {}
+              hereBaseRef.current = { lat: coords.latitude, lon: coords.longitude };
+              setHerePos({ lat: coords.latitude, lon: coords.longitude });
+              recomputeLineLayout();
               setStatus("");
             },
             () => setStatus("현재 위치를 가져오지 못했습니다."),
@@ -365,7 +253,8 @@ export default function MainMap() {
 
         await ensureStomp();
 
-        try { subRef.current?.unsubscribe(); } catch {}
+        try { subUserRef.current?.unsubscribe(); } catch {}
+        try { subVehicleRef.current?.unsubscribe(); } catch {}
         try { stompRef.current?.disconnect(() => {}); } catch {}
         try { wsRef.current?.close?.(); } catch {}
         clearTimeout(reconnectTimerRef.current);
@@ -382,33 +271,64 @@ export default function MainMap() {
           async () => {
             if (cancelled) return;
             console.log("✅ STOMP Connected");
+            console.log("🔔 Subscribing topic:", `/topic/group/${groupId}`);
 
-            // (A) 구독
-            const sub = stomp.subscribe(`/topic/group/${groupId}`, (message) => {
+            // (A) 사용자 위치(그룹) 구독 — 서버가 USER_UPDATE로 래핑해서 줄 수도 있음
+            subUserRef.current = stomp.subscribe(`/topic/group/${groupId}`, (message) => {
               try {
-                const data = JSON.parse(message.body);
-                handleIncomingLocation(data);
+                const raw = JSON.parse(message.body);
+                const { type, payload } = unwrapRTU(raw);
+                handleInboundLog({ type, payload });
 
-                const fromId = data?.userId ?? data?.user?.id ?? null;
-                const lat = Number(data?.latitude);
-                const lon = Number(data?.longitude);
-                const nm = data?.name ?? data?.userName ?? data?.nickname ?? data?.user?.name ?? null;
+                // 사용자 위치 (래퍼가 없어도 payload로 통일)
+                const p = type === "LEGACY" ? raw : payload;
+                const fromId = p?.userId ?? p?.user?.id ?? null;
+                const lat = Number(p?.latitude);
+                const lon = Number(p?.longitude);
+                const nm = p?.name ?? p?.userName ?? p?.nickname ?? p?.user?.name ?? null;
                 if (fromId != null && nm) setCachedName(fromId, nm);
 
+                // 내 메시지는 무시
+                if (fromId != null && userId != null && Number(fromId) === Number(userId)) return;
                 if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-                if (fromId != null && userId != null && Number(fromId) === Number(userId)) return; // 내 메시지는 무시
                 placeOrMoveOtherMarker(fromId, lat, lon);
-              } catch (e) { console.warn("수신 파싱 실패:", e, message?.body); }
+              } catch (e) { console.warn("USER stream parse fail:", e, message?.body); }
             });
-            subRef.current = sub;
 
-            // (B) 가족 이름들 미리 채우기
-            try {
-              const nameMap = await fetchGroupMembers(groupId, token);
-              for (const [uid, name] of Object.entries(nameMap)) setCachedName(uid, name);
-            } catch {}
+            // (B) 차량 위치(그룹) 구독 — 명세: /topic/group/{groupId}/location, type: VEHICLE_UPDATE
+            subVehicleRef.current = stomp.subscribe(`/topic/group/${groupId}/location`, (message) => {
+              try {
+                const raw = JSON.parse(message.body);
+                const { type, payload } = unwrapRTU(raw);
+                handleInboundLog({ type, payload });
 
-            // (C) 내 위치 watch & 전송(내 이름 포함)
+                if (type !== "VEHICLE_UPDATE") return;
+                const lat = Number(payload?.latitude);
+                const lon = Number(payload?.longitude);
+                const speed = payload?.speed;
+                const batt = payload?.batteryLevel;
+                const statusTxt = payload?.status;
+                const ts = fromLocalDateTimeArray(payload?.timestamp);
+
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+                // 차량 마커 생성/이동
+                moveVehicleMarker(lat, lon, {
+                  title:
+                    `차량` +
+                    (Number.isFinite(speed) ? ` • ${speed}km/h` : "") +
+                    (Number.isFinite(batt) ? ` • ${batt}%` : "") +
+                    (statusTxt ? ` • ${statusTxt}` : "") +
+                    (ts ? ` • ${ts.toLocaleString()}` : ""),
+                });
+
+                // 차 → 내 위치 경로 갱신
+                lastCarPosRef.current = { lat, lon };
+                if (herePos) drawCarToHereRoute({ lat, lon }, herePos);
+              } catch (e) { console.warn("VEHICLE stream parse fail:", e, message?.body); }
+            });
+
+            // (C) 내 위치 watch & 전송 (명세: 래퍼 없이 lat/lon만 전송)
             if ("geolocation" in navigator) {
               try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
               watchIdRef.current = navigator.geolocation.watchPosition(
@@ -416,13 +336,11 @@ export default function MainMap() {
                   const lat = pos.coords.latitude;
                   const lon = pos.coords.longitude;
                   moveMyMarker(lat, lon);
-                  const payload = {
-                    latitude: lat, longitude: lon,
-                    ...(groupId ? { groupId } : {}),
-                    ...(userId ? { userId } : {}),
-                    ...(myIdsRef.current.myName ? { name: myIdsRef.current.myName } : {}),
-                  };
-                  try { stomp.send("/app/location/update", {}, JSON.stringify(payload)); } catch (e) { console.warn("위치 전송 실패", e); }
+                  try {
+                    const body = JSON.stringify({ latitude: lat, longitude: lon });
+                    console.log("📤 sending:", { latitude: lat, longitude: lon });
+                    stomp.send("/app/location/update", {}, body);
+                  } catch (e) { console.warn("위치 전송 실패", e); }
                 },
                 (err) => console.warn("watchPosition 실패", err),
                 { enableHighAccuracy: true, maximumAge: 1500, timeout: 12000 }
@@ -444,6 +362,7 @@ export default function MainMap() {
       }
     };
 
+    // 지도 준비 & groupId 준비되면 연결
     const readyCheck = setInterval(() => {
       const hasMap = !!mapRef.current;
       const { groupId } = myIdsRef.current || {};
@@ -453,15 +372,17 @@ export default function MainMap() {
     return () => {
       cancelled = true;
       clearInterval(readyCheck);
-      try { subRef.current?.unsubscribe(); } catch {}
+      try { subUserRef.current?.unsubscribe(); } catch {}
+      try { subVehicleRef.current?.unsubscribe(); } catch {}
       try { stompRef.current?.disconnect(() => {}); } catch {}
       try { wsRef.current?.close?.(); } catch {}
       try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
       clearTimeout(reconnectTimerRef.current);
       for (const meta of otherMarkersRef.current.values()) { try { meta.marker.setMap(null); } catch {} }
       otherMarkersRef.current.clear();
+      try { carMarkerRef.current?.setMap(null); } catch {}
     };
-  }, [handleIncomingLocation, setCachedName, getDisplayName]);
+  }, [handleInboundLog, setCachedName, getDisplayName]); // eslint-disable-line
 
   /* ===== 레이아웃(가로 반겹) ===== */
   function recomputeLineLayout() {
@@ -471,6 +392,7 @@ export default function MainMap() {
 
     const zoom = mapRef.current.getZoom?.() ?? 15;
     const mpp = metersPerPixelAtLat(meLat, zoom);
+
     const stepM = (LINE_LAYOUT.desiredPx || 18) * mpp;
     const clusterM = (LINE_LAYOUT.clusterPx || 14) * mpp;
 
@@ -512,6 +434,8 @@ export default function MainMap() {
       setHerePos({ lat, lon });
       hereBaseRef.current = { lat, lon };
       if (mapRef.current && window.Tmapv2) recomputeLineLayout();
+      // 차 경로 즉시 업데이트
+      if (lastCarPosRef.current) drawCarToHereRoute(lastCarPosRef.current, { lat, lon });
     } catch {}
   }
 
@@ -530,11 +454,8 @@ export default function MainMap() {
         position: new window.Tmapv2.LatLng(base.lat, base.lon),
         map: mapRef.current,
         icon,
-        title: titleNow, // hover/접근성
+        title: titleNow,
       });
-      // ✅ 클릭 시 로그인 이름(캐시) 말풍선
-      marker.addListener?.("click", () => showMarkerName(marker, getDisplayName(userId)));
-
       meta = makeMarkerMeta(marker, base, userId);
       otherMarkersRef.current.set(idKey, meta);
     } else {
@@ -543,11 +464,35 @@ export default function MainMap() {
         if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(titleNow);
         else meta.marker.options && (meta.marker.options.title = titleNow);
       } catch {}
+      try { meta.marker.setPosition(new window.Tmapv2.LatLng(base.lat, base.lon)); } catch {}
     }
     recomputeLineLayout();
   }
 
-  /* ===== 이하: 검색/경로 로직(기존 그대로) ===== */
+  /** 🚗 차량 마커를 생성/이동 */
+  function moveVehicleMarker(lat, lon, { title } = {}) {
+    if (!mapRef.current || !window.Tmapv2) return;
+    if (!carMarkerRef.current) {
+      try {
+        carMarkerRef.current = new window.Tmapv2.Marker({
+          position: new window.Tmapv2.LatLng(lat, lon),
+          map: mapRef.current,
+          icon: ICONS.car,
+          title: title || "차량",
+        });
+      } catch {}
+    } else {
+      try { carMarkerRef.current.setPosition(new window.Tmapv2.LatLng(lat, lon)); } catch {}
+      try {
+        if (title) {
+          if (typeof carMarkerRef.current.setTitle === "function") carMarkerRef.current.setTitle(title);
+          else carMarkerRef.current.options && (carMarkerRef.current.options.title = title);
+        }
+      } catch {}
+    }
+  }
+
+  /* ===== 이하: 검색/경로 로직 ===== */
   const debounceRef = useRef(null);
   const abortRef = useRef(null);
   useEffect(() => {
@@ -621,11 +566,14 @@ export default function MainMap() {
     } catch {}
     if (herePos) {
       drawRoute(herePos, { lat: selectedPlace.lat, lon: selectedPlace.lon });
-      openCompare(selectedPlace);
     }
   }, [selectedPlace, herePos]);
 
-  useEffect(() => { if (herePos) drawCarToHereRoute(CAR_POS, herePos); }, [herePos]);
+  useEffect(() => {
+    if (herePos && lastCarPosRef.current) {
+      drawCarToHereRoute(lastCarPosRef.current, herePos);
+    }
+  }, [herePos]);
 
   const drawRoute = async (start, end) => {
     try {
@@ -677,7 +625,7 @@ export default function MainMap() {
     try {
       if (!mapRef.current) return;
       const appKey = process.env.REACT_APP_TMAP_APPKEY;
-      if (!appKey) return alert("TMAP AppKey가 없습니다.");
+      if (!appKey) return; // 조용히 무시
       if (![start, end].every(p => Number.isFinite(p.lat) && Number.isFinite(p.lon))) return;
 
       if (carRouteRef.current) {
@@ -714,16 +662,6 @@ export default function MainMap() {
     } catch (e) { console.error("차→나 경로 그리기 실패:", e); }
   };
 
-  const openCompare = (dest) => {
-    if (!herePos || !dest) return;
-    const dLat = Math.abs(herePos.lat - dest.lat);
-    const dLon = Math.abs(herePos.lon - dest.lon);
-    const km = Math.sqrt(dLat*dLat + dLon*dLon) * 111;
-    const carMin = Math.max(7, Math.round(km * 3.5));
-    const transitMin = Math.max(10, Math.round(km * 2.8) + 8);
-    setCompare({ carMin, transitMin });
-  };
-
   const pickResult = (item) => {
     setQuery(item.name); setOpen(false);
     if (!Number.isFinite(item.lat) || !Number.isFinite(item.lon)) { alert("선택한 장소의 좌표가 없습니다."); return; }
@@ -733,7 +671,6 @@ export default function MainMap() {
     setQuery(""); setResults([]); setOpen(false); setSelectedPlace(null); setStatus("");
     if (destMarkerRef.current) { destMarkerRef.current.setMap(null); destMarkerRef.current = null; }
     if (routeLineRef.current) { routeLineRef.current.halo?.setMap(null); routeLineRef.current.main?.setMap(null); routeLineRef.current = null; }
-    setCompare(null);
   };
 
   return (
@@ -744,8 +681,7 @@ export default function MainMap() {
           <input
             value={query}
             onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
-            onFocus={() => { setOpen(Boolean(query)); setCompare(null); }}
-            onClick={() => setCompare(null)}
+            onFocus={() => { setOpen(Boolean(query)); }}
             placeholder="도착지 검색(장소명)"
           />
           {query && <button className="clearBtn" onClick={clearQuery} aria-label="지우기">×</button>}
@@ -767,22 +703,6 @@ export default function MainMap() {
       <div className="mapCanvas" ref={mapDivRef} />
       {status && <div className="mapStatus">{status}</div>}
 
-      {compare && (
-        <div className="cmpOverlay" onClick={() => setCompare(null)}>
-          <div className="cmpCard" onClick={(e)=>e.stopPropagation()}>
-            <div className="cmpHandle" />
-            <div className="cmpTitle">도착지까지 걸리는 시간</div>
-            <hr className="cmpDiv" />
-            <div className="cmpRow"><span>🚗 차량 도착 및 이동 시간</span><b>{compare.carMin}분</b></div>
-            <hr className="cmpDiv" />
-            <div className="cmpRow"><span>🚇 대중교통 이용 시간</span><b>{compare.transitMin}분</b></div>
-            <hr className="cmpDiv" />
-            <div className="cmpGuide">차량 이용을 원하시면 <b>좌측 상단 메뉴에서 예약</b>해주세요.</div>
-            <button className="cmpOK" onClick={() => setCompare(null)}>확인</button>
-          </div>
-        </div>
-      )}
-
       <style>{`
         .mainShell{ min-height:100dvh; display:flex; flex-direction:column; position:relative; overflow:hidden; max-width:420px; margin:0 auto; border-radius:22px; }
         .mapCanvas{ flex:1; }
@@ -797,16 +717,6 @@ export default function MainMap() {
         .resultItem:hover{ background:#f8f7ff; }
         .rTitle{ font-weight:700; }
         .rAddr{ color:#666; font-size:12px; margin-top:2px; }
-        .hint{ padding:10px 12px; color:#666; font-size:13px; }
-        .cmpOverlay{ position:absolute; inset:0; display:flex; align-items:flex-end; justify-content:center; z-index:10000; padding:12px; }
-        .cmpCard{ width:100%; background:#fff; border-radius:16px 16px 12px 12px; box-shadow:0 18px 50px rgba(0,0,0,.18); padding:16px 14px calc(env(safe-area-inset-bottom,0) + 14px); max-height:75vh; overflow:auto; }
-        .cmpHandle{ width:48px; height:5px; border-radius:6px; margin:4px auto 10px; background:#e5e7eb; }
-        .cmpTitle{ text-align:center; font-weight:800; color:#374151; }
-        .cmpDiv{ border:none; border-top:1px solid #eceef2; margin:12px 0; }
-        .cmpRow{ display:flex; align-items:center; justify-content:space-between; font-size:15px; color:#4b5563; }
-        .cmpRow b{ color:#111827; font-size:16px; }
-        .cmpGuide{ text-align:center; color:#6b7280; line-height:1.6; margin:6px 0 8px; }
-        .cmpOK{ width:100%; height:44px; border:none; border-radius:12px; background:linear-gradient(135deg,#6a5af9,#8f7bff); color:#fff; font-weight:700; margin-top:8px; cursor:pointer; }
       `}</style>
     </div>
   );

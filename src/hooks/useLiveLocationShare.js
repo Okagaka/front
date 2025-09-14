@@ -1,16 +1,22 @@
-// src/hooks/useLiveLocationShare.js
 import { useEffect, useRef } from "react";
 import { Client } from "@stomp/stompjs";
 
-// ✅ WS URL을 환경변수 우선 사용, 없으면 로컬로 폴백
-const WS_URL =
-  process.env.REACT_APP_WS_URL ||
-  (window.location.protocol === "https:"
-    ? `wss://${window.location.hostname}/ws-location`
-    : `ws://${window.location.hostname}:8080/ws-location`);
+/** ===== WS URL 계산 (하드코딩 제거) ===== */
+function computeWsUrl() {
+  // 1순위: REACT_APP_WS_URL (ex: wss://13.209.57.96:8080/ws-location)
+  if (process.env.REACT_APP_WS_URL) return process.env.REACT_APP_WS_URL;
+
+  // 2순위: REACT_APP_API_BASE에서 프로토콜/호스트를 따와서 ws(s)로 변환
+  const httpBase = process.env.REACT_APP_API_BASE || window.location.origin;
+  const u = new URL(httpBase.startsWith("http") ? httpBase : `https://${httpBase}`);
+  const wsProto = u.protocol === "https:" ? "wss:" : "ws:";
+  const wsPath = process.env.REACT_APP_WS_PATH || "/ws-location"; // 경로도 env로
+
+  // u.host는 포트 포함(host:port). 8080 하드코딩 제거!
+  return `${wsProto}//${u.host}${wsPath}`;
+}
 
 function getAuthToken() {
-  // 로그인 시 저장해둔 토큰 키에 맞추세요 (예: accessToken)
   return (
     localStorage.getItem("accessToken") ||
     sessionStorage.getItem("jwt") ||
@@ -18,10 +24,11 @@ function getAuthToken() {
   );
 }
 
-export function useLiveLocationShare() {
+export function useLiveLocationShare({ groupId, userId, userName } = {}) {
   const clientRef = useRef(null);
 
   useEffect(() => {
+    const WS_URL = computeWsUrl();
     const token = getAuthToken();
 
     console.log("[LiveWS] will connect to:", WS_URL);
@@ -38,14 +45,25 @@ export function useLiveLocationShare() {
     client.onConnect = () => {
       console.log("✅ STOMP CONNECTED");
 
-      // 위치 전송: 최초 한번 + 이후 변경 watch
+      // publish 목적지도 env로 분리 (기본값 유지)
+      const DEST = process.env.REACT_APP_STOMP_DEST || "/app/location/update";
+
+      // 서버 명세: RealTimeUpdate wrapper { type, payload }
       const send = (lat, lng) => {
-        const body = JSON.stringify({ latitude: lat, longitude: lng });
-        console.log("📤 sending location", { lat, lng });
-        client.publish({ destination: "/app/location/update", body });
+        const wire = {
+          type: "USER_UPDATE",
+          payload: {
+            latitude: lat,
+            longitude: lng,
+            ...(groupId ? { groupId } : {}),
+            ...(userId ? { userId } : {}),
+            ...(userName ? { name: userName } : {}),
+          },
+        };
+        client.publish({ destination: DEST, body: JSON.stringify(wire) });
       };
 
-      // 현재 위치 한 번 보내기
+      // 현재 위치 1회 전송
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           ({ coords }) => send(coords.latitude, coords.longitude),
@@ -54,7 +72,7 @@ export function useLiveLocationShare() {
         );
       }
 
-      // 이후 변경 감지해서 주기 전송
+      // 이후 watch
       const watchId = navigator.geolocation?.watchPosition(
         ({ coords }) => send(coords.latitude, coords.longitude),
         (err) => console.warn("geolocation watchPosition error:", err),
@@ -79,7 +97,7 @@ export function useLiveLocationShare() {
       }
       client.deactivate();
     };
-  }, []);
+  }, [groupId, userId, userName]);
 
   return null;
 }
