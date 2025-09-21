@@ -288,7 +288,6 @@ export default function Signup() {
     });
   };
 
-  const goBack = () => setStep(s => Math.max(1, s - 1));
   const handleBack = () => {
     if (step > 1) {
       setStep((s) => Math.max(1, s - 1));
@@ -357,14 +356,13 @@ export default function Signup() {
         }
       }
       else if (step === 6) {
-        // 가입 완료 후 홈으로 이동 (auth 저장)
         const displayName = (finalUser?.userName ?? name)?.trim() || "";
         const displayPhone = finalUser?.phoneNumber ?? phoneNumber ?? "";
 
         const auth = {
           name: displayName,
           phone: displayPhone,
-          token: undefined, // 보통 회원가입 후엔 로그인 토큰 별도 발급 절차
+          token: undefined,
           userId: finalUser?.userId ?? finalUser?.id ?? null,
           groupId: finalUser?.familyId ?? finalUser?.groupId ?? null,
         };
@@ -532,17 +530,43 @@ export default function Signup() {
 
       <style>{`
         .card.signup { height: 100vh; overflow-y: auto; display:flex; flex-direction:column; }
-        .screen { flex:1; padding-bottom:140px; }
-        .formFooter { position: sticky; bottom: 0; z-index: 20; background:#fff; padding:12px 16px calc(16px + env(safe-area-inset-bottom)); box-shadow:0 -8px 24px rgba(0,0,0,.08); border-top:1px solid #eee; }
-        .primaryBtn { width:100%; }
+        .screen { flex:1; padding-bottom:180px; }
+        .formFooter {
+          position: sticky; bottom: 0; z-index: 20;
+          background:#fff; padding:12px 16px calc(16px + env(safe-area-inset-bottom));
+          box-shadow:0 -8px 24px rgba(0,0,0,.08); border-top:1px solid #eee;
+          -webkit-background-clip: padding-box; background-clip: padding-box;
+        }
+
+        /* ✅ '다음' 버튼: iOS/Safari 테두리/하이라이트 완전 제거 + 둥근모서리 클리핑 */
+        .primaryBtn{
+          width:100%;
+          display:flex; align-items:center; justify-content:center;
+          height:56px;
+          background:#6a34d6; color:#fff;
+          border:0; border-radius:18px;
+          font-size:18px; font-weight:800;
+          appearance:none; -webkit-appearance:none;   /* 기본 버튼 스타일 제거 */
+          outline:none;
+          -webkit-tap-highlight-color: transparent;    /* iOS 탭 하이라이트 제거 */
+          background-clip: padding-box; -webkit-background-clip: padding-box;
+          overflow:hidden;                              /* 포커스/하이라이트가 모서리 밖으로 새지 않도록 */
+          position:relative;
+          box-shadow:0 8px 24px rgba(106,52,214,.28);   /* 예쁜 그림자만 유지 */
+          transform: translateZ(0);                     /* 컴포지팅 안정화 */
+        }
+
+        .primaryBtn::-moz-focus-inner{ border:0; padding:0; } /* FF 내부 테두리 제거 */
 
         .header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
         .stepTitle{ font-weight:700; color:#6a34d6; }
+
         .grid4{ display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin:8px 0 16px; }
         .uploadSlot{ position:relative; width:100%; padding-top:100%; border:1px dashed #c9c9c9; border-radius:12px; cursor:pointer; overflow:hidden; background:#fafafa; }
         .uploadPlaceholder{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; color:#777; font-size:14px; text-align:center; }
         .uploadImg{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
         .ghostBtn{ width:100%; margin-top:8px; background:#f6f4ff; color:#6a34d6; border:1px solid #e1d9ff; border-radius:10px; padding:10px 12px; }
+
         .resultBox{ border:1px solid #eee; border-radius:12px; padding:12px; background:#fafafa; }
         .hintBox{ margin-top:8px; padding:8px 10px; background:#f6f6f6; border-radius:10px; color:#444; }
         .hint{ color:#666; font-size:13px; }

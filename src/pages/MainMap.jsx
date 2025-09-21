@@ -5,9 +5,6 @@ import { useLocation, useNavigate } from "react-router-dom";
 /* ====== 공통 설정 ====== */
 const API_BASE = (process.env.REACT_APP_API_BASE || "").replace(/\/$/, "");
 
-/* (보존) STT */
-const STT_URL = API_BASE ? `${API_BASE}/api/stt` : "/api/stt";
-
 /* WebSocket URL (환경변수 우선) */
 const WS_URL = (() => {
   const env = process.env.REACT_APP_WS_BASE || API_BASE;
@@ -101,19 +98,15 @@ function metersPerPixelAtLat(lat, zoom) {
   );
 }
 
-/* ====== 유틸 ====== */
+/* ===== 유틸 ===== */
 function makeMarkerMeta(marker, base, idKey) {
   return { marker, base: { ...base }, idKey };
 }
-
-/** RealTimeUpdate 래퍼 해제 */
 function unwrapRTU(raw) {
   const hasWrapper = raw && typeof raw === "object" && "payload" in raw;
   if (hasWrapper) return { type: raw.type || "UNKNOWN", payload: raw.payload };
   return { type: "LEGACY", payload: raw };
 }
-
-/** [yyyy,M,d,H,m,s,(nano)] → Date */
 function fromLocalDateTimeArray(arr) {
   if (!Array.isArray(arr) || arr.length < 6) return null;
   const [y, M, d, H, m, s] = arr;
@@ -123,17 +116,11 @@ function fromLocalDateTimeArray(arr) {
     return null;
   }
 }
-
-/** 문자열 해시(작은 정수) */
 function hashStr(s) {
   let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (h * 31 + s.charCodeAt(i)) | 0;
-  }
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
   return Math.abs(h);
 }
-
-/** 수신 메시지/헤더로부터 "발신자 키" 만들기 (userId가 없어도 고유키 생성) */
 function senderKey(p, headers = {}) {
   const uid = p?.userId ?? p?.user?.id;
   if (uid != null) return `u:${uid}`;
@@ -141,6 +128,217 @@ function senderKey(p, headers = {}) {
   const alt = p?.deviceId || p?.clientId || p?.phone || p?.name;
   if (alt) return `c:${String(alt)}`;
   return `msg:${headers["message-id"] || Math.random().toString(36).slice(2)}`;
+}
+
+/** fetch 옵션 생성기: Bearer 토큰 + 쿠키 인증 모두 지원 */
+function buildAuthFetchOptions({ method = "GET", json, signal } = {}) {
+  const jwt = getJwt();
+  const headers = { accept: "application/json" };
+  if (json) headers["content-type"] = "application/json";
+  if (jwt) headers["Authorization"] = `Bearer ${jwt}`;
+  return {
+    method,
+    headers,
+    credentials: "include",
+    ...(json ? { body: JSON.stringify(json) } : {}),
+    ...(signal ? { signal } : {}),
+  };
+}
+/** 401 대응: Bearer/쿠키를 바꿔가며 재시도 */
+async function fetchWithAuthRetry(url, opts) {
+  let res = await fetch(url, opts);
+  if (res.status === 401 && opts?.headers?.Authorization) {
+    const { Authorization, ...restHeaders } = opts.headers;
+    const retryOpts = { ...opts, headers: restHeaders };
+    res = await fetch(url, retryOpts);
+  } else if (res.status === 401 && !opts?.headers?.Authorization) {
+    const jwt = getJwt();
+    if (jwt) {
+      const retryOpts = {
+        ...opts,
+        headers: { ...(opts.headers || {}), Authorization: `Bearer ${jwt}` },
+      };
+      res = await fetch(url, retryOpts);
+    }
+  }
+  return res;
+}
+
+/* ===== 엔드포인트 ===== */
+// /api/eta 와 /eta 모두 자동 시도 (백엔드가 준비되면 사용, 실패 시 Tmap fallback 사용)
+const ETA_ENDPOINTS = (() => {
+  const list = [];
+  if (API_BASE) {
+    list.push(`${API_BASE}/api/eta`);
+    list.push(`${API_BASE}/eta`);
+  }
+  list.push("/api/eta");
+  list.push("/eta");
+  return list;
+})();
+const CAR_REQUEST_POST = [`${API_BASE}/api/car-request`, `/api/car-request`];
+const carDecisionGetList = (id) => [
+  `${API_BASE}/api/car-request/${id}/decision`,
+  `/api/car-request/${id}/decision`,
+];
+
+/* ===== ETA payload 모드: nested | flat ===== */
+function buildETAPayload(start, end, destinationName) {
+  const mode = (process.env.REACT_APP_ETA_PAYLOAD_MODE || "nested").toLowerCase();
+  if (mode === "flat") {
+    return {
+      startLat: start.lat,
+      startLon: start.lon,
+      endLat: end.lat,
+      endLon: end.lon,
+      destinationName: destinationName || null,
+    };
+  }
+  return {
+    start: { lat: start.lat, lon: start.lon },
+    end: { lat: end.lat, lon: end.lon },
+    destinationName: destinationName || null,
+  };
+}
+
+/* ===== ETA 백엔드 (서킷 브레이커 적용) + Fallback ===== */
+let ETA_CIRCUIT_OPEN_UNTIL = 0;
+async function fetchETAFromBackend({ start, end, destinationName, signal }) {
+  const cbDisabled = String(process.env.REACT_APP_ETA_CB_DISABLE).match(/^true$/i);
+  if (!cbDisabled && Date.now() < ETA_CIRCUIT_OPEN_UNTIL) {
+    const err = new Error("ETA circuit open");
+    err.name = "EtaCircuitOpen";
+    throw err;
+  }
+  const payload = buildETAPayload(start, end, destinationName);
+
+  let lastErr = null;
+  for (const url of ETA_ENDPOINTS) {
+    try {
+      const res = await fetchWithAuthRetry(
+        url,
+        buildAuthFetchOptions({ method: "POST", json: payload, signal })
+      );
+      if (!res.ok) {
+        let text = "";
+        try { text = await res.text(); } catch {}
+        console.warn(`[ETA] ${url} -> ${res.status}`, text);
+        if (res.status >= 500 && !cbDisabled) {
+          ETA_CIRCUIT_OPEN_UNTIL = Date.now() + 60_000; // 60s
+        }
+        lastErr = new Error(`ETA ${url} -> ${res.status}`);
+        continue; // 다음 후보
+      }
+      const raw = await res.json();
+      const data = raw?.data ?? raw;
+      const carMinutes = Number.isFinite(+data?.carMinutes) ? +data.carMinutes : null;
+      const transitMinutes = Number.isFinite(+data?.transitMinutes) ? +data.transitMinutes : null;
+      const recommend =
+        data?.recommend === "car" || data?.recommend === "transit"
+          ? data.recommend
+          : (carMinutes != null && transitMinutes != null
+              ? (transitMinutes < carMinutes ? "transit" : "car")
+              : "car");
+      return {
+        carMinutes,
+        transitMinutes,
+        recommend,
+        recommendMessage: data?.recommendMessage ?? "",
+        subMessage: data?.subMessage ?? "",
+        buttonLabel: data?.buttonLabel ?? "차량 이용",
+      };
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      lastErr = e;
+      continue;
+    }
+  }
+  throw lastErr || new Error("ETA endpoints unreachable");
+}
+
+/* ===== 주소 DTO 생성 ===== */
+function buildDestinationDtoFromPlace(place) {
+  const p = place?._raw || {};
+  let city = p.upperAddrName || "";
+  let gu = p.middleAddrName || "";
+  let dong = p.lowerAddrName || "";
+  let bunji = p.buildingNo || "";
+
+  const addr = (place?.addr || "").trim();
+  if (!(city && gu && dong) && addr) {
+    const parts = addr.split(/\s+/);
+    if (!city && parts.length) city = parts[0] || city;
+    if (!gu && parts.length > 1) gu = parts[1] || gu;
+    if (!dong && parts.length > 2) dong = parts[2] || dong;
+    if (!bunji) {
+      const last = parts[parts.length - 1] || "";
+      if (/^\d+(-\d+)?$/.test(last)) bunji = last;
+    }
+  }
+  return {
+    destinationCityDo: city || "",
+    destinationGuGun: gu || "",
+    destinationDong: dong || "",
+    destinationBunji: bunji || "",
+  };
+}
+
+/* ===== 차량 요청 생성 ===== */
+async function createCarRequestByAddress(destDto) {
+  let lastErr = null;
+  for (const url of CAR_REQUEST_POST) {
+    try {
+      const res = await fetchWithAuthRetry(
+        url,
+        buildAuthFetchOptions({ method: "POST", json: destDto })
+      );
+      if (res.status !== 202) {
+        lastErr = new Error(`POST ${url} -> ${res.status}`);
+        continue;
+      }
+      const body = await res.json().catch(() => ({}));
+      const data = body?.data ?? body;
+      const id = data?.carRequestId;
+      if (!id) throw new Error("carRequestId missing in response");
+      return String(id);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Car request creation failed");
+}
+
+/* ===== 결과 폴링(GET) ===== */
+async function fetchCarDecisionOnce(carRequestId) {
+  let lastErr = null;
+  for (const url of carDecisionGetList(carRequestId)) {
+    try {
+      const res = await fetchWithAuthRetry(
+        url,
+        buildAuthFetchOptions({ method: "GET" })
+      );
+      if (res.status === 404) return null; // 아직
+      if (res.status === 200) {
+        const body = await res.json();
+        const d = body?.data ?? body;
+        const decision = String(d?.decision || "");
+        return {
+          raw: d,
+          decision,
+          reason: d?.reason || "",
+          pickupTime: d?.pickupTime || null,
+          destinationTime: d?.destinationTime || null,
+          carTotalTime: Number.isFinite(+d?.carTotalTime) ? +d.carTotalTime : null,
+          transitTotalTime: Number.isFinite(+d?.transitTotalTime) ? +d.transitTotalTime : null,
+        };
+      }
+      lastErr = new Error(`GET ${url} -> ${res.status}`);
+      continue;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Car decision polling failed");
 }
 
 export default function MainMap() {
@@ -179,12 +377,12 @@ export default function MainMap() {
   const subVehicleRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const watchIdRef = useRef(null);
+  const connRef = useRef({ connecting: false, connected: false });
 
   // 가족 마커
   const otherMarkersRef = useRef(new Map());
   const myIdsRef = useRef({ userId: null, groupId: null, myName: null });
 
-  // 이름 캐시 (idKey 기준)
   const nameCacheRef = useRef(new Map());
   const getDisplayName = useCallback((idKey) => {
     const key = String(idKey ?? "");
@@ -202,10 +400,7 @@ export default function MainMap() {
       } catch {}
     }
   }, []);
-
-  const handleInboundLog = useCallback((msg) => {
-    console.log("📩 inbound:", msg);
-  }, []);
+  const handleInboundLog = useCallback((msg) => { console.log("📩 inbound:", msg); }, []);
 
   // 로그인 복구
   useEffect(() => {
@@ -222,10 +417,7 @@ export default function MainMap() {
         } catch {}
       }
     }
-    if (!me) {
-      nav("/", { replace: true });
-      return;
-    }
+    if (!me) { nav("/", { replace: true }); return; }
     myIdsRef.current.userId = me.userId ?? null;
     myIdsRef.current.groupId = me.groupId ?? null;
     myIdsRef.current.myName = me.name ?? null;
@@ -236,25 +428,15 @@ export default function MainMap() {
     let cancelled = false;
     (async () => {
       const tag = document.getElementById("tmap-js-sdk");
-      if (!tag) {
-        setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')");
-        return;
-      }
+      if (!tag) { setStatus("index.html의 Tmap 스크립트를 확인하세요. (id='tmap-js-sdk')"); return; }
 
       try {
         await waitForTmapV2();
         if (cancelled || didInitRef.current) return;
         const { Tmapv2 } = window;
-        if (!Tmapv2 || typeof Tmapv2.Map !== "function") {
-          setStatus("지도 로드 실패: Tmap SDK 준비 안 됨");
-          return;
-        }
+        if (!Tmapv2 || typeof Tmapv2.Map !== "function") { setStatus("지도 로드 실패: Tmap SDK 준비 안 됨"); return; }
 
-        if (mapRef.current?.destroy) {
-          try {
-            mapRef.current.destroy();
-          } catch {}
-        }
+        if (mapRef.current?.destroy) { try { mapRef.current.destroy(); } catch {} }
         const map = new window.Tmapv2.Map(mapDivRef.current, {
           center: new window.Tmapv2.LatLng(37.5666805, 126.9784147),
           width: "100%",
@@ -264,31 +446,20 @@ export default function MainMap() {
         mapRef.current = map;
         didInitRef.current = true;
 
-        try {
-          map.addListener("zoom_changed", () => recomputeLineLayout());
-        } catch {}
+        try { map.addListener("zoom_changed", () => recomputeLineLayout()); } catch {}
 
         // 현재 위치
         if ("geolocation" in navigator) {
           navigator.geolocation.getCurrentPosition(
             ({ coords }) => {
-              const here = new window.Tmapv2.LatLng(
-                coords.latitude,
-                coords.longitude
-              );
+              const here = new window.Tmapv2.LatLng(coords.latitude, coords.longitude);
               map.setCenter(here);
               try {
                 hereMarkerRef.current = new window.Tmapv2.Marker({
-                  position: here,
-                  map,
-                  icon: ICONS.me,
-                  title: "현재 위치",
+                  position: here, map, icon: ICONS.me, title: "현재 위치",
                 });
               } catch {}
-              hereBaseRef.current = {
-                lat: coords.latitude,
-                lon: coords.longitude,
-              };
+              hereBaseRef.current = { lat: coords.latitude, lon: coords.longitude };
               setHerePos({ lat: coords.latitude, lon: coords.longitude });
               recomputeLineLayout();
               setStatus("");
@@ -302,46 +473,67 @@ export default function MainMap() {
         setStatus("지도 로드 실패: SDK 준비 시간 초과");
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   /* ===== WebSocket/STOMP 연결 & 위치 송수신 ===== */
   useEffect(() => {
     let cancelled = false;
 
-    const connect = async () => {
-      try {
-        const token = getJwt();
-        const { userId, groupId } = myIdsRef.current || {};
-        if (!token || !groupId) {
-          console.warn("토큰 또는 groupId 없음 → STOMP 연결 보류", {
-            token: !!token,
-            groupId,
-          });
-          return;
-        }
+    const disconnectSafely = () => {
+      try { clearTimeout(reconnectTimerRef.current); } catch {}
+      try { if (stompRef.current?.connected) subUserRef.current?.unsubscribe(); } catch {}
+      try { if (stompRef.current?.connected) subVehicleRef.current?.unsubscribe(); } catch {}
+      try { if (stompRef.current?.connected) stompRef.current?.disconnect(() => {}); } catch {}
+      try { if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.close(); } catch {}
+      subUserRef.current = null;
+      subVehicleRef.current = null;
+      stompRef.current = null;
+      wsRef.current = null;
+      connRef.current = { connecting: false, connected: false };
+    };
 
+    const scheduleReconnect = (delay = 2500) => {
+      if (cancelled) return;
+      try { clearTimeout(reconnectTimerRef.current); } catch {}
+      reconnectTimerRef.current = setTimeout(connect, delay);
+    };
+
+    const connect = async () => {
+      const ws = wsRef.current;
+      if (
+        connRef.current.connecting ||
+        connRef.current.connected ||
+        (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+      ) return;
+
+      const token = getJwt();
+      const { groupId } = myIdsRef.current || {};
+      if (!token || !groupId || !mapRef.current) return;
+
+      connRef.current.connecting = true;
+
+      try {
         await ensureStomp();
 
-        try {
-          subUserRef.current?.unsubscribe();
-        } catch {}
-        try {
-          subVehicleRef.current?.unsubscribe();
-        } catch {}
-        try {
-          stompRef.current?.disconnect(() => {});
-        } catch {}
-        try {
-          wsRef.current?.close?.();
-        } catch {}
-        clearTimeout(reconnectTimerRef.current);
+        try { if (stompRef.current?.connected) subUserRef.current?.unsubscribe(); } catch {}
+        try { if (stompRef.current?.connected) subVehicleRef.current?.unsubscribe(); } catch {}
+        try { if (stompRef.current?.connected) stompRef.current?.disconnect(() => {}); } catch {}
+        try { if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.close(); } catch {}
+        subUserRef.current = null;
+        subVehicleRef.current = null;
+        stompRef.current = null;
+        wsRef.current = null;
 
         const socket = new WebSocket(WS_URL);
         wsRef.current = socket;
+
+        socket.onclose = () => {
+          connRef.current.connected = false;
+          connRef.current.connecting = false;
+          if (!cancelled) scheduleReconnect(2500);
+        };
+
         const stomp = window.Stomp.over(socket);
         stomp.debug = null;
         stompRef.current = stomp;
@@ -349,40 +541,32 @@ export default function MainMap() {
         const headers = { Authorization: `Bearer ${token}` };
         stomp.connect(
           headers,
-          async () => {
+          () => {
             if (cancelled) return;
             console.log("✅ STOMP Connected");
-            console.log("🔔 Subscribing topic:", `/topic/group/${groupId}`);
+            connRef.current.connected = true;
+            connRef.current.connecting = false;
 
-            // (A) 사용자 위치
+            // (A) 사용자 위치 스트림
             subUserRef.current = stomp.subscribe(
               `/topic/group/${groupId}`,
               (message) => {
                 try {
                   const raw = JSON.parse(message.body);
                   const { type, payload } = unwrapRTU(raw);
-                  handleInboundLog({ type, payload });
-
                   const p = type === "LEGACY" ? raw : payload;
                   const lat = Number(p?.latitude);
                   const lon = Number(p?.longitude);
                   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
 
-                  // 내 위치 메시지는 userId 있을 때만 필터
                   const fromId = p?.userId ?? p?.user?.id ?? null;
-                  if (
-                    fromId != null &&
-                    myIdsRef.current?.userId != null &&
-                    Number(fromId) === Number(myIdsRef.current.userId)
-                  ) {
-                    return;
-                  }
+                  if (fromId != null &&
+                      myIdsRef.current?.userId != null &&
+                      Number(fromId) === Number(myIdsRef.current.userId)) return;
 
                   const key = senderKey(p, message.headers);
-                  const display =
-                    p?.name || p?.userName || p?.nickname || p?.user?.name;
+                  const display = p?.name || p?.userName || p?.nickname || p?.user?.name;
                   if (display) setCachedName(key, display);
-
                   placeOrMoveOtherMarker(key, lat, lon, display);
                 } catch (e) {
                   console.warn("USER stream parse fail:", e, message?.body);
@@ -390,15 +574,13 @@ export default function MainMap() {
               }
             );
 
-            // (B) 차량 위치
+            // (B) 차량 위치 스트림
             subVehicleRef.current = stomp.subscribe(
               `/topic/group/${groupId}/location`,
               (message) => {
                 try {
                   const raw = JSON.parse(message.body);
                   const { type, payload } = unwrapRTU(raw);
-                  handleInboundLog({ type, payload });
-
                   if (type !== "VEHICLE_UPDATE") return;
 
                   const lat = Number(payload?.latitude);
@@ -420,7 +602,9 @@ export default function MainMap() {
                   });
 
                   lastCarPosRef.current = { lat, lon };
-                  if (herePos) drawCarToHereRoute({ lat, lon }, herePos);
+                  if (hereBaseRef.current.lat != null && hereBaseRef.current.lon != null) {
+                    drawCarToHereRoute({ lat, lon }, hereBaseRef.current);
+                  }
                 } catch (e) {
                   console.warn("VEHICLE stream parse fail:", e, message?.body);
                 }
@@ -429,9 +613,7 @@ export default function MainMap() {
 
             // (C) 내 위치 전송
             if ("geolocation" in navigator) {
-              try {
-                navigator.geolocation.clearWatch(watchIdRef.current);
-              } catch {}
+              try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
               watchIdRef.current = navigator.geolocation.watchPosition(
                 (pos) => {
                   const lat = pos.coords.latitude;
@@ -439,11 +621,8 @@ export default function MainMap() {
                   moveMyMarker(lat, lon);
                   try {
                     const body = JSON.stringify({ latitude: lat, longitude: lon });
-                    console.log("📤 sending:", { latitude: lat, longitude: lon });
                     stomp.send("/app/location/update", {}, body);
-                  } catch (e) {
-                    console.warn("위치 전송 실패", e);
-                  }
+                  } catch (e) { console.warn("위치 전송 실패", e); }
                 },
                 (err) => console.warn("watchPosition 실패", err),
                 { enableHighAccuracy: true, maximumAge: 1500, timeout: 12000 }
@@ -452,20 +631,19 @@ export default function MainMap() {
           },
           (error) => {
             console.error("❌ STOMP 연결 실패:", error);
-            if (!cancelled) {
-              clearTimeout(reconnectTimerRef.current);
-              reconnectTimerRef.current = setTimeout(connect, 2500);
-            }
+            connRef.current.connecting = false;
+            connRef.current.connected = false;
+            if (!cancelled) scheduleReconnect(2500);
           }
         );
       } catch (e) {
         console.error("STOMP 초기화 실패:", e);
-        clearTimeout(reconnectTimerRef.current);
-        if (!cancelled) reconnectTimerRef.current = setTimeout(connect, 3000);
+        connRef.current.connecting = false;
+        connRef.current.connected = false;
+        if (!cancelled) scheduleReconnect(3000);
       }
     };
 
-    // 지도 & groupId 준비되면 연결
     const readyCheck = setInterval(() => {
       const hasMap = !!mapRef.current;
       const { groupId } = myIdsRef.current || {};
@@ -478,34 +656,24 @@ export default function MainMap() {
     return () => {
       cancelled = true;
       clearInterval(readyCheck);
-      try {
-        subUserRef.current?.unsubscribe();
-      } catch {}
-      try {
-        subVehicleRef.current?.unsubscribe();
-      } catch {}
-      try {
-        stompRef.current?.disconnect(() => {});
-      } catch {}
-      try {
-        wsRef.current?.close?.();
-      } catch {}
-      try {
-        navigator.geolocation.clearWatch(watchIdRef.current);
-      } catch {}
-      clearTimeout(reconnectTimerRef.current);
-
+      try { navigator.geolocation.clearWatch(watchIdRef.current); } catch {}
+      try { clearTimeout(reconnectTimerRef.current); } catch {}
+      try { if (stompRef.current?.connected) subUserRef.current?.unsubscribe(); } catch {}
+      try { if (stompRef.current?.connected) subVehicleRef.current?.unsubscribe(); } catch {}
+      try { if (stompRef.current?.connected) stompRef.current?.disconnect(() => {}); } catch {}
+      try { if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.close(); } catch {}
+      subUserRef.current = null;
+      subVehicleRef.current = null;
+      stompRef.current = null;
+      wsRef.current = null;
+      connRef.current = { connecting: false, connected: false };
       for (const meta of otherMarkersRef.current.values()) {
-        try {
-          meta.marker.setMap(null);
-        } catch {}
+        try { meta.marker.setMap(null); } catch {}
       }
       otherMarkersRef.current.clear();
-      try {
-        carMarkerRef.current?.setMap(null);
-      } catch {}
+      try { carMarkerRef.current?.setMap(null); } catch {}
     };
-  }, [handleInboundLog, setCachedName, getDisplayName]); // eslint-disable-line
+  }, [setCachedName, getDisplayName]);
 
   /* ===== 레이아웃(가로 반겹) ===== */
   function recomputeLineLayout() {
@@ -525,16 +693,10 @@ export default function MainMap() {
       if (d <= clusterM) near.push({ meta });
     });
 
-    // idKey 기준으로 안정 정렬
     near.sort((a, b) => (a.meta.idKey || "").localeCompare(b.meta.idKey || ""));
 
-    const R = 6378137,
-      rad = Math.PI / 180;
-    try {
-      hereMarkerRef.current?.setPosition(
-        new window.Tmapv2.LatLng(meLat, meLon)
-      );
-    } catch {}
+    const R = 6378137, rad = Math.PI / 180;
+    try { hereMarkerRef.current?.setPosition(new window.Tmapv2.LatLng(meLat, meLon)); } catch {}
 
     for (let i = 0; i < near.length; i++) {
       const sign = i % 2 === 0 ? 1 : -1;
@@ -543,19 +705,13 @@ export default function MainMap() {
       const dLon = (offsetM / (R * Math.cos(meLat * rad))) * (180 / Math.PI);
       const adj = { lat: meLat, lon: meLon + dLon };
       const { marker } = near[i].meta;
-      try {
-        marker.setPosition(new window.Tmapv2.LatLng(adj.lat, adj.lon));
-      } catch {}
+      try { marker.setPosition(new window.Tmapv2.LatLng(adj.lat, adj.lon)); } catch {}
     }
 
     otherMarkersRef.current.forEach((meta) => {
       const inNear = near.some((x) => x.meta === meta);
       if (!inNear) {
-        try {
-          meta.marker.setPosition(
-            new window.Tmapv2.LatLng(meta.base.lat, meta.base.lon)
-          );
-        } catch {}
+        try { meta.marker.setPosition(new window.Tmapv2.LatLng(meta.base.lat, meta.base.lon)); } catch {}
       }
     });
   }
@@ -569,7 +725,6 @@ export default function MainMap() {
     } catch {}
   }
 
-  /** idKey 기반으로 가족 마커 배치 */
   function placeOrMoveOtherMarker(idKey, lat, lon, displayName) {
     if (!mapRef.current || !window.Tmapv2) return;
     const key = String(idKey || "unknown");
@@ -583,21 +738,17 @@ export default function MainMap() {
       const marker = new window.Tmapv2.Marker({
         position: new window.Tmapv2.LatLng(base.lat, base.lon),
         map: mapRef.current,
-        icon,
-        title: titleNow,
+        icon, title: titleNow,
       });
       meta = makeMarkerMeta(marker, base, key);
       otherMarkersRef.current.set(key, meta);
     } else {
       meta.base = base;
       try {
-        if (typeof meta.marker.setTitle === "function")
-          meta.marker.setTitle(titleNow);
+        if (typeof meta.marker.setTitle === "function") meta.marker.setTitle(titleNow);
         else meta.marker.options && (meta.marker.options.title = titleNow);
       } catch {}
-      try {
-        meta.marker.setPosition(new window.Tmapv2.LatLng(base.lat, base.lon));
-      } catch {}
+      try { meta.marker.setPosition(new window.Tmapv2.LatLng(base.lat, base.lon)); } catch {}
     }
     recomputeLineLayout();
   }
@@ -609,22 +760,15 @@ export default function MainMap() {
       try {
         carMarkerRef.current = new window.Tmapv2.Marker({
           position: new window.Tmapv2.LatLng(lat, lon),
-          map: mapRef.current,
-          icon: ICONS.car,
-          title: title || "차량",
+          map: mapRef.current, icon: ICONS.car, title: title || "차량",
         });
       } catch {}
     } else {
-      try {
-        carMarkerRef.current.setPosition(new window.Tmapv2.LatLng(lat, lon));
-      } catch {}
+      try { carMarkerRef.current.setPosition(new window.Tmapv2.LatLng(lat, lon)); } catch {}
       try {
         if (title) {
-          if (typeof carMarkerRef.current.setTitle === "function")
-            carMarkerRef.current.setTitle(title);
-          else
-            carMarkerRef.current.options &&
-              (carMarkerRef.current.options.title = title);
+          if (typeof carMarkerRef.current.setTitle === "function") carMarkerRef.current.setTitle(title);
+          else carMarkerRef.current.options && (carMarkerRef.current.options.title = title);
         }
       } catch {}
     }
@@ -636,9 +780,7 @@ export default function MainMap() {
   useEffect(() => {
     const keyword = query.trim();
     if (!keyword) {
-      setResults([]);
-      setOpen(false);
-      abortRef.current?.abort();
+      setResults([]); setOpen(false); abortRef.current?.abort();
       return;
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -650,8 +792,7 @@ export default function MainMap() {
 
         const appKey = process.env.REACT_APP_TMAP_APPKEY;
         const center = mapRef.current?.getCenter?.();
-        const centerLat = center?._lat,
-          centerLon = center?._lng;
+        const centerLat = center?._lat, centerLon = center?._lng;
 
         const url = new URL("https://apis.openapi.sk.com/tmap/pois");
         url.searchParams.set("version", "1");
@@ -677,24 +818,15 @@ export default function MainMap() {
         const toNum = (v) => (v == null ? NaN : Number(String(v).trim()));
         const items = list
           .map((p) => {
-            const latStr =
-              p.frontLat ?? p.noorLat ?? p.lat ?? p.centerLat ?? p.newLat;
-            const lonStr =
-              p.frontLon ?? p.noorLon ?? p.lon ?? p.centerLon ?? p.newLon;
-            const lat = toNum(latStr),
-              lon = toNum(lonStr);
+            const latStr = p.frontLat ?? p.noorLat ?? p.lat ?? p.centerLat ?? p.newLat;
+            const lonStr = p.frontLon ?? p.noorLon ?? p.lon ?? p.centerLon ?? p.newLon;
+            const lat = toNum(latStr), lon = toNum(lonStr);
             return {
               id: p.id,
               name: p.name,
               addr:
                 p?.newAddressList?.newAddress?.[0]?.fullAddressRoad ??
-                [
-                  p.upperAddrName,
-                  p.middleAddrName,
-                  p.lowerAddrName,
-                  p.roadName,
-                  p.buildingNo,
-                ]
+                [p.upperAddrName, p.middleAddrName, p.lowerAddrName, p.roadName, p.buildingNo]
                   .filter(Boolean)
                   .join(" "),
               lat,
@@ -707,42 +839,70 @@ export default function MainMap() {
         setResults(items);
         setOpen(true);
       } catch (e) {
-        if (e.name !== "AbortError") {
-          console.error(e);
-          setResults([]);
-          setOpen(false);
-        }
-      } finally {
-        setLoading(false);
-      }
+        if (e.name !== "AbortError") { console.error(e); setResults([]); setOpen(false); }
+      } finally { setLoading(false); }
     }, 250);
 
     return () => clearTimeout(debounceRef.current);
   }, [query]);
 
+  // 🔄 ETA/결과/폴링 등 모든 상태를 초기화
+  const etaAbortRef = useRef(null);
+  const pollTimerRef = useRef(null);
+  const pollStartAtRef = useRef(0);
+  const [etaOpen, setEtaOpen] = useState(false);
+  const [etaLoading, setEtaLoading] = useState(false);
+  const [eta, setEta] = useState({
+    carMin: null, transitMin: null, recommend: "car",
+    recommendMessage: "", subMessage: "", buttonLabel: "차량 이용",
+  });
+  const [carReqId, setCarReqId] = useState(null);
+  const [carReqPhase, setCarReqPhase] = useState("idle"); // idle | requesting | polling | done | error
+  const [carReqError, setCarReqError] = useState("");
+  const [decision, setDecision] = useState(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+  }, []);
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const resetEtaAndDecision = useCallback(() => {
+    etaAbortRef.current?.abort();
+    stopPolling();
+    setEtaOpen(false);
+    setEtaLoading(false);
+    setEta({
+      carMin: null, transitMin: null, recommend: "car",
+      recommendMessage: "", subMessage: "", buttonLabel: "차량 이용",
+    });
+    setCarReqId(null);
+    setCarReqPhase("idle");
+    setCarReqError("");
+    setDecision(null);
+  }, [stopPolling]);
+
+  // 선택된 장소가 바뀌면 지도 이동 + 마커 + 경로 + (바로) ETA 계산 트리거
   useEffect(() => {
     if (!selectedPlace) return;
     const map = mapRef.current;
     if (!map || !window.Tmapv2) return;
+
+    // 새 목적지로 바꾸는 순간 이전 상태를 전부 리셋
+    resetEtaAndDecision();
+
     const pos = new window.Tmapv2.LatLng(selectedPlace.lat, selectedPlace.lon);
     map.setCenter(pos);
     map.setZoom(16);
     try {
       if (destMarkerRef.current) destMarkerRef.current.setMap(null);
       destMarkerRef.current = new window.Tmapv2.Marker({
-        position: pos,
-        map,
-        icon: ICONS.dest,
-        title: selectedPlace.name,
+        position: pos, map, icon: ICONS.dest, title: selectedPlace.name,
       });
     } catch {}
     if (herePos) {
-      drawRoute(herePos, {
-        lat: selectedPlace.lat,
-        lon: selectedPlace.lon,
-      });
+      drawRoute(herePos, { lat: selectedPlace.lat, lon: selectedPlace.lon }, { destinationName: selectedPlace.name });
     }
-  }, [selectedPlace, herePos]);
+  }, [selectedPlace, herePos, resetEtaAndDecision]);
 
   useEffect(() => {
     if (herePos && lastCarPosRef.current) {
@@ -750,13 +910,97 @@ export default function MainMap() {
     }
   }, [herePos]);
 
-  const drawRoute = async (start, end) => {
+  const startPollingDecision = useCallback((id) => {
+    stopPolling();
+    setCarReqPhase("polling");
+    setCarReqError("");
+    setDecision(null);
+    pollStartAtRef.current = Date.now();
+
+    pollTimerRef.current = setInterval(async () => {
+      if (Date.now() - pollStartAtRef.current > 30000) {
+        stopPolling();
+        setCarReqPhase("error");
+        setCarReqError("분석 대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.");
+        return;
+      }
+      try {
+        const info = await fetchCarDecisionOnce(id);
+        if (info === null) return; // 아직
+        stopPolling();
+        setDecision(info);
+        setCarReqPhase("done");
+        // 결정 결과에 총 소요시간이 있으면 상단 ETA도 덮어쓰기
+        setEta((prev) => ({
+          ...prev,
+          carMin: info.carTotalTime ?? prev.carMin,
+          transitMin: info.transitTotalTime ?? prev.transitMin,
+        }));
+      } catch (e) {
+        console.error("poll error:", e);
+        stopPolling();
+        setCarReqPhase("error");
+        setCarReqError("결과 조회 중 오류가 발생했습니다.");
+      }
+    }, 2500);
+  }, [stopPolling]);
+
+  const requestETAFromBackend = useCallback(async ({ start, end, destinationName }) => {
+    try {
+      setEtaLoading(true);
+      setEtaOpen(true);
+      etaAbortRef.current?.abort();
+      etaAbortRef.current = new AbortController();
+
+      const data = await fetchETAFromBackend({
+        start, end, destinationName,
+        signal: etaAbortRef.current.signal,
+      });
+
+      setEta((prev) => ({
+        ...prev,
+        carMin: data.carMinutes ?? prev.carMin,
+        transitMin: data.transitMinutes ?? prev.transitMin,
+        recommend: data.recommend ?? "car",
+        recommendMessage: data.recommendMessage || "",
+        subMessage: data.subMessage || "",
+        buttonLabel: data.buttonLabel || "차량 이용",
+      }));
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      console.warn("ETA unavailable:", e?.message || e);
+      setEta((prev) => ({
+        ...prev,
+        recommend: "car",
+        recommendMessage: "현재 소요시간 정보를 불러오지 못했습니다.",
+        subMessage: "경로는 정상 표시되며, 차량 추천은 ‘AI 추천 요청하기’로 확인하세요.",
+        buttonLabel: "AI 추천 요청하기",
+      }));
+      setEtaOpen(true);
+    } finally {
+      setEtaLoading(false);
+    }
+  }, []);
+
+  // 👉 Tmap 경로 API에서 요약 시간(초)을 추출하여 분으로 반환 (fallback)
+  function extractCarMinutesFromTmap(features) {
+    // properties.totalTime(초) 가 들어있는 summary 성격의 feature가 있음
+    let sec = null;
+    for (const f of features || []) {
+      const t = Number(f?.properties?.totalTime);
+      if (Number.isFinite(t)) sec = t; // 마지막 summary 덮어쓰기
+    }
+    if (sec == null) return null;
+    return Math.max(0, Math.round(sec / 60));
+  }
+
+  // 경로 그리기 + 즉시 ETA(차량) 표시 + 백엔드 ETA 시도
+  const drawRoute = async (start, end, { destinationName = "" } = {}) => {
     try {
       if (!mapRef.current) return;
       const appKey = process.env.REACT_APP_TMAP_APPKEY;
       if (!appKey) return alert("TMAP AppKey가 없습니다.");
-      if (![start, end].every((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)))
-        return;
+      if (![start, end].every((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))) return;
 
       if (routeLineRef.current) {
         routeLineRef.current.halo?.setMap(null);
@@ -766,28 +1010,18 @@ export default function MainMap() {
 
       const url = "https://apis.openapi.sk.com/tmap/routes?version=1&format=json";
       const body = {
-        startX: start.lon,
-        startY: start.lat,
-        endX: end.lon,
-        endY: end.lat,
-        reqCoordType: "WGS84GEO",
-        resCoordType: "WGS84GEO",
+        startX: start.lon, startY: start.lat,
+        endX: end.lon, endY: end.lat,
+        reqCoordType: "WGS84GEO", resCoordType: "WGS84GEO",
         trafficInfo: "Y",
       };
 
       const res = await fetch(url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          appKey,
-        },
+        headers: { "content-type": "application/json", accept: "application/json", appKey },
         body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        console.error("경로 API 실패:", res.status, await res.text());
-        return alert("경로 API 호출 실패");
-      }
+      if (!res.ok) { console.error("경로 API 실패:", res.status, await res.text()); return alert("경로 API 호출 실패"); }
 
       const data = await res.json();
       const features = data?.features ?? [];
@@ -795,36 +1029,38 @@ export default function MainMap() {
       for (const f of features) {
         if (f?.geometry?.type === "LineString") {
           for (const c of f.geometry.coordinates) {
-            const x = Number(c[0]),
-              y = Number(c[1]);
-            if (Number.isFinite(x) && Number.isFinite(y))
-              pts.push(new window.Tmapv2.LatLng(y, x));
+            const x = Number(c[0]), y = Number(c[1]);
+            if (Number.isFinite(x) && Number.isFinite(y)) pts.push(new window.Tmapv2.LatLng(y, x));
           }
         }
       }
       if (!pts.length) return alert("경로 선 정보를 찾지 못했습니다.");
 
+      // 🔹 경로 요약 시간으로 "차량 이용 시" 즉시 표시
+      const carMinFromTmap = extractCarMinutesFromTmap(features);
+      if (carMinFromTmap != null) {
+        setEtaOpen(true);
+        setEta((prev) => ({ ...prev, carMin: carMinFromTmap }));
+      }
+
       const halo = new window.Tmapv2.Polyline({
-        map: mapRef.current,
-        path: pts,
-        strokeColor: "#FFFFFF",
-        strokeWeight: 10,
-        strokeOpacity: 1,
-        zIndex: 9998,
+        map: mapRef.current, path: pts, strokeColor: "#FFFFFF",
+        strokeWeight: 10, strokeOpacity: 1, zIndex: 9998,
       });
       const main = new window.Tmapv2.Polyline({
-        map: mapRef.current,
-        path: pts,
-        strokeColor: "#0066FF",
-        strokeWeight: 6,
-        strokeOpacity: 1,
-        zIndex: 9999,
+        map: mapRef.current, path: pts, strokeColor: "#0066FF",
+        strokeWeight: 6, strokeOpacity: 1, zIndex: 9999,
       });
       routeLineRef.current = { halo, main };
 
       const bounds = new window.Tmapv2.LatLngBounds();
       pts.forEach((p) => bounds.extend(p));
       mapRef.current.fitBounds(bounds);
+
+      // 🔹 백엔드 ETA도 시도 (성공 시 차량/대중교통 값을 덮어씀)
+      requestETAFromBackend({
+        start, end, destinationName,
+      });
     } catch (e) {
       console.error("경로 그리기 실패:", e);
       alert("경로를 불러오는 중 오류");
@@ -835,9 +1071,8 @@ export default function MainMap() {
     try {
       if (!mapRef.current) return;
       const appKey = process.env.REACT_APP_TMAP_APPKEY;
-      if (!appKey) return; // 조용히 무시
-      if (![start, end].every((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)))
-        return;
+      if (!appKey) return;
+      if (![start, end].every((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))) return;
 
       if (carRouteRef.current) {
         carRouteRef.current.halo?.setMap(null);
@@ -847,31 +1082,19 @@ export default function MainMap() {
 
       const url = "https://apis.openapi.sk.com/tmap/routes?version=1&format=json";
       const body = {
-        startX: Number(start.lon),
-        startY: Number(start.lat),
-        endX: Number(end.lon),
-        endY: Number(end.lat),
-        reqCoordType: "WGS84GEO",
-        resCoordType: "WGS84GEO",
-        trafficInfo: "N",
-        searchOption: 0,
-        startName: "차량",
-        endName: "내 위치",
+        startX: Number(start.lon), startY: Number(start.lat),
+        endX: Number(end.lon), endY: Number(end.lat),
+        reqCoordType: "WGS84GEO", resCoordType: "WGS84GEO",
+        trafficInfo: "N", searchOption: 0,
+        startName: "차량", endName: "내 위치",
       };
 
       const res = await fetch(url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          appKey,
-        },
+        headers: { "content-type": "application/json", accept: "application/json", appKey },
         body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        console.error("차→나 경로 실패:", res.status, await res.text());
-        return;
-      }
+      if (!res.ok) { console.error("차→나 경로 실패:", res.status, await res.text()); return; }
 
       const data = await res.json();
       const features = data?.features ?? [];
@@ -879,33 +1102,22 @@ export default function MainMap() {
       for (const f of features) {
         if (f?.geometry?.type === "LineString") {
           for (const [lon, lat] of f.geometry.coordinates) {
-            if (Number.isFinite(lon) && Number.isFinite(lat))
-              pts.push(new window.Tmapv2.LatLng(lat, lon));
+            if (Number.isFinite(lon) && Number.isFinite(lat)) pts.push(new window.Tmapv2.LatLng(lat, lon));
           }
         }
       }
       if (!pts.length) return;
 
       const halo = new window.Tmapv2.Polyline({
-        map: mapRef.current,
-        path: pts,
-        strokeColor: "#FFFFFF",
-        strokeWeight: 10,
-        strokeOpacity: 1,
-        zIndex: 9996,
+        map: mapRef.current, path: pts, strokeColor: "#FFFFFF",
+        strokeWeight: 10, strokeOpacity: 1, zIndex: 9996,
       });
       const main = new window.Tmapv2.Polyline({
-        map: mapRef.current,
-        path: pts,
-        strokeColor: "#FF2D55",
-        strokeWeight: 6,
-        strokeOpacity: 1,
-        zIndex: 9997,
+        map: mapRef.current, path: pts, strokeColor: "#FF2D55",
+        strokeWeight: 6, strokeOpacity: 1, zIndex: 9997,
       });
       carRouteRef.current = { halo, main };
-    } catch (e) {
-      console.error("차→나 경로 그리기 실패:", e);
-    }
+    } catch (e) { console.error("차→나 경로 그리기 실패:", e); }
   };
 
   const pickResult = (item) => {
@@ -917,20 +1129,33 @@ export default function MainMap() {
     }
     setSelectedPlace(item);
   };
+
   const clearQuery = () => {
-    setQuery("");
-    setResults([]);
-    setOpen(false);
-    setSelectedPlace(null);
-    setStatus("");
-    if (destMarkerRef.current) {
-      destMarkerRef.current.setMap(null);
-      destMarkerRef.current = null;
-    }
-    if (routeLineRef.current) {
-      routeLineRef.current.halo?.setMap(null);
-      routeLineRef.current.main?.setMap(null);
-      routeLineRef.current = null;
+    setQuery(""); setResults([]); setOpen(false); setSelectedPlace(null); setStatus("");
+    if (destMarkerRef.current) { destMarkerRef.current.setMap(null); destMarkerRef.current = null; }
+    if (routeLineRef.current) { routeLineRef.current.halo?.setMap(null); routeLineRef.current.main?.setMap(null); routeLineRef.current = null; }
+    resetEtaAndDecision();
+  };
+
+  /* ===== 차량 요청 트리거 ===== */
+  const handleClickCarRequest = async () => {
+    if (!selectedPlace) return alert("도착지를 먼저 선택해 주세요.");
+    try {
+      const destDto = buildDestinationDtoFromPlace(selectedPlace);
+      // 참고 로그: 필요한 경우 서버에 전달되는 payload 확인
+      // console.log("[CAR-REQUEST] payload =", destDto);
+
+      setCarReqPhase("requesting");
+      setCarReqError("");
+      setDecision(null);
+
+      const id = await createCarRequestByAddress(destDto);
+      setCarReqId(id);
+      startPollingDecision(id);
+    } catch (e) {
+      console.error("car request error:", e);
+      setCarReqPhase("error");
+      setCarReqError("요청 처리 중 오류가 발생했습니다.");
     }
   };
 
@@ -941,38 +1166,24 @@ export default function MainMap() {
           <span className="pin">📍</span>
           <input
             value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setOpen(true);
-            }}
-            onFocus={() => {
-              setOpen(Boolean(query));
-            }}
+            onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+            onFocus={() => { setOpen(Boolean(query)); }}
             placeholder="도착지 검색(장소명)"
           />
-          {query && (
-            <button className="clearBtn" onClick={clearQuery} aria-label="지우기">
-              ×
-            </button>
+        {query && (
+            <button className="clearBtn" onClick={clearQuery} aria-label="지우기">×</button>
           )}
         </div>
         {open && (results.length > 0 || loading) && (
           <div className="resultBox">
             {loading && <div className="hint">검색 중…</div>}
-            {!loading &&
-              results.map((r) => (
-                <button
-                  key={`${r.id}-${r.name}`}
-                  className="resultItem"
-                  onClick={() => pickResult(r)}
-                >
-                  <div className="rTitle">{r.name}</div>
-                  <div className="rAddr">{r.addr}</div>
-                </button>
-              ))}
-            {!loading && results.length === 0 && (
-              <div className="hint">검색 결과가 없습니다</div>
-            )}
+            {!loading && results.map((r) => (
+              <button key={`${r.id}-${r.name}`} className="resultItem" onClick={() => pickResult(r)}>
+                <div className="rTitle">{r.name}</div>
+                <div className="rAddr">{r.addr}</div>
+              </button>
+            ))}
+            {!loading && results.length === 0 && <div className="hint">검색 결과가 없습니다</div>}
           </div>
         )}
       </div>
@@ -980,11 +1191,81 @@ export default function MainMap() {
       <div className="mapCanvas" ref={mapDivRef} />
       {status && <div className="mapStatus">{status}</div>}
 
+      {etaOpen && (
+        <div className="etaBackdrop" onClick={resetEtaAndDecision /* 모달 밖 클릭 시 완전 리셋 */}>
+          <div className="etaCard" onClick={(e) => e.stopPropagation()}>
+            <button className="etaClose" aria-label="닫기" onClick={resetEtaAndDecision}>×</button>
+
+            <div className="etaTitle">도착지까지 걸리는 시간</div>
+            <hr className="etaHr" />
+
+            <div className="etaRow">
+              <span>차량 이용 시</span>
+              <strong>{etaLoading ? "계산 중…" : (eta.carMin != null ? `${eta.carMin}분` : "-")}</strong>
+            </div>
+            <div className="etaRow">
+              <span>대중교통 이용 시</span>
+              <strong>{etaLoading ? "계산 중…" : (eta.transitMin != null ? `${eta.transitMin}분` : "-")}</strong>
+            </div>
+
+            <hr className="etaHr" />
+            <p className="etaDesc">{etaLoading ? "소요시간을 계산하고 있습니다…" : (eta.recommendMessage || "")}</p>
+            <p className="etaSub">{etaLoading ? "" : (eta.subMessage || "")}</p>
+
+            <div className="reqArea">
+              {carReqPhase === "idle" && (
+                <button className="etaPrimary" onClick={handleClickCarRequest} disabled={!selectedPlace || etaLoading}>
+                  AI 추천 요청하기
+                </button>
+              )}
+              {carReqPhase === "requesting" && (
+                <div className="reqInfo">요청을 접수 중입니다…</div>
+              )}
+              {carReqPhase === "polling" && (
+                <div className="reqInfo">
+                  AI가 최적 경로를 분석 중입니다… ⏳<br/>
+                  (자동으로 결과를 가져옵니다)
+                </div>
+              )}
+              {carReqPhase === "done" && decision && (
+                <div className="decisionBox">
+                  {decision.decision === "Vehicle" && (
+                    <>
+                      <div className="decTitle">🚗 자율주행차 이용을 추천합니다!</div>
+                      {Number.isFinite(decision.carTotalTime) && <div className="decRow"><span>총 소요시간</span><b>{decision.carTotalTime}분</b></div>}
+                      {decision.pickupTime && <div className="decRow"><span>예상 픽업</span><b>{String(decision.pickupTime)}</b></div>}
+                      {decision.destinationTime && <div className="decRow"><span>도착 예상</span><b>{String(decision.destinationTime)}</b></div>}
+                      {decision.reason && <p className="decReason">{decision.reason}</p>}
+                    </>
+                  )}
+                  {decision.decision === "Public_Transport" && (
+                    <>
+                      <div className="decTitle">🚌 대중교통 이용을 추천합니다!</div>
+                      {Number.isFinite(decision.transitTotalTime) && <div className="decRow"><span>총 소요시간</span><b>{decision.transitTotalTime}분</b></div>}
+                      {decision.reason && <p className="decReason">{decision.reason}</p>}
+                    </>
+                  )}
+                  {decision.decision !== "Vehicle" && decision.decision !== "Public_Transport" && (
+                    <>
+                      <div className="decTitle">🚫 요청이 거절되었습니다</div>
+                      {decision.reason && <p className="decReason">{decision.reason}</p>}
+                    </>
+                  )}
+                </div>
+              )}
+              {carReqPhase === "error" && (
+                <div className="reqErr">{carReqError || "처리 중 오류가 발생했습니다."}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <style>{`
         .mainShell{ min-height:100dvh; display:flex; flex-direction:column; position:relative; overflow:hidden; max-width:420px; margin:0 auto; border-radius:22px; }
         .mapCanvas{ flex:1; }
         .mapStatus{ position:absolute; top:64px; left:0; right:0; text-align:center; font-weight:700; color:#555; }
-        .searchWrap{ position:absolute; left:12px; right:12px; top:10px; z-index:10; display:flex; flex-direction:column; gap:8px; }
+        .searchWrap{ position:absolute; left:12px; right:12px; top: 30px; z-index:10; display:flex; flex-direction:column; gap:8px; }
         .searchBar{ display:flex; align-items:center; gap:8px; background:#fff; border-radius:12px; padding:10px 12px; border:1px solid #e5e6ea; box-shadow:0 6px 18px rgba(0,0,0,.12); }
         .searchBar input{ flex:1; border:none; outline:none; font-size:15px; }
         .pin{ opacity:.7; }
@@ -994,6 +1275,26 @@ export default function MainMap() {
         .resultItem:hover{ background:#f8f7ff; }
         .rTitle{ font-weight:700; }
         .rAddr{ color:#666; font-size:12px; margin-top:2px; }
+
+        .etaBackdrop{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.25); z-index:20; padding:16px; }
+        .etaCard{ width:100%; max-width:360px; background:#fff; border-radius:16px; box-shadow:0 14px 34px rgba(0,0,0,.22); padding:20px 18px 22px; position:relative; }
+        .etaClose{ position:absolute; top:10px; right:10px; border:none; background:transparent; font-size:22px; line-height:1; cursor:pointer; opacity:.5; }
+        .etaTitle{ text-align:center; font-weight:800; font-size:16px; color:#333; margin-top:2px; margin-bottom:10px; }
+        .etaHr{ border:0; border-top:1px solid #e9e9ee; margin:8px 0 14px; }
+        .etaRow{ display:flex; align-items:center; justify-content:space-between; padding:12px 4px; font-size:15px; color:#444; }
+        .etaRow strong{ font-size:17px; font-weight:800; color:#222; }
+        .etaDesc{ text-align:center; color:#555; margin:12px 2px 2px; line-height:1.5; }
+        .etaSub{ text-align:center; color:#666; margin:2px 2px 14px; line-height:1.5; }
+        .etaPrimary{ display:block; width:100%; padding:12px 16px; border:none; border-radius:12px; background:#6A38F0; color:#fff; font-weight:800; font-size:16px; cursor:pointer; box-shadow:0 10px 18px rgba(106,56,240,.28); }
+        .etaPrimary:active{ transform:translateY(1px); }
+
+        .reqArea{ margin-top:8px; }
+        .reqInfo{ text-align:center; color:#4b4b4b; font-size:14px; padding:10px 0; }
+        .reqErr{ text-align:center; color:#d3003f; font-size:14px; padding:10px 0; }
+        .decisionBox{ background:#faf9ff; border:1px solid #ece9ff; border-radius:12px; padding:12px; }
+        .decTitle{ font-weight:800; margin-bottom:8px; }
+        .decRow{ display:flex; justify-content:space-between; padding:6px 2px; }
+        .decReason{ color:#555; margin-top:8px; line-height:1.5; }
       `}</style>
     </div>
   );
